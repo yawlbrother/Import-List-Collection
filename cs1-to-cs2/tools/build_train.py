@@ -28,9 +28,16 @@ from build_prop import (did, cs1_materials, material_for_mesh, convert_textures,
 ACTIVITY_BOARD = '55cd31323498ccf4ca4831d41291c0f4'
 EFFECT_HEADLIGHT = 'de32f8ad166d2d944b6f069e25675da1'
 EFFECT_TRAIN = '76d8c52143e7618448f2ff10af98015c'
-BODY_CUT_Y = 1.2         # triangles entirely below this (near a bogie) = bogie frame
-BOGIE_ZONE_Z = 5.0       # bogie parts only exist beyond this distance from the car centre
+BOGIE_TOP_Y = 1.0        # bogie frame and axle boxes stay below this
+BOGIE_MARGIN = 0.35      # bogie box reaches this far beyond the outer wheel rims
 WHEEL_TOP_Y = 0.72
+SURFACE_KEYWORDS = ('_EMISSIVE_PROCEDURAL', '_TANGENTSPACE_OCTO')
+# (purpose, colour, colour when the purpose is inactive, intensity, luminance, texture layer)
+# purposes and numbers copied from a working custom train: 23 = interior lights, 3 = headlamps
+LIGHTS = [(23, (1, 0.9974498, 0.745, 1), (0, 0, 0, 1), 0.05, 0.964706, 255),
+          (3, (1, 1, 1, 1), (0.8, 0, 0, 1), 1.0, 1.0, 25)]           # red tail lamps when not leading
+LIGHTS_LOD = [(0, (0.96, 0.96, 0.96, 1), (0, 0, 0, 1), 1.03658521, 0.964706, 255),
+              (3, (1, 1, 1, 1), (0.8, 0, 0, 1), 1.0, 1.0, 25)]
 
 # ---------------------------------------------------------------- CS1 vehicle data
 def vehicle_gen(b, E, mesh_index):
@@ -78,23 +85,24 @@ def connected_components(V, T):
     return np.array([find(x) for x in canon])
 
 def assign_bones(V, T, bogies, wheel_y):
-    """Bone index per vertex: 0 body, then per bogie [wheelset, axle, axle] in bogies order."""
+    """Bone index per vertex: 0 body, then per bogie [wheelset, axle, axle] in bogies order.
+    A bogie owns the triangles that lie entirely inside a box around it: below the underframe
+    and no further along the car than its outer wheel rims plus a margin. Everything else,
+    including the underframe, end skirts and door steps, stays with the body."""
     bone = np.zeros(len(V), np.uint32)
-    # a vertex may only join a bogie if every triangle it touches stays below the body skirt;
-    # skirt panels have their bottom edge down at bogie height but reach far up
-    tri_max_y = V[T][:, :, 1].max(1)
-    vmax = np.full(len(V), -9.0)
-    for k in range(3):
-        np.maximum.at(vmax, T[:, k], tri_max_y)
     comp = connected_components(V, T)
     comp_size = np.bincount(comp); comp_ymax = np.full(comp.max() + 1, -9.0)
     np.maximum.at(comp_ymax, comp, V[:, 1])
     is_wheel_part = (comp_size[comp] < 120) & (comp_ymax[comp] < WHEEL_TOP_Y) & (np.abs(V[:, 0]) < 0.9)
     is_shaft = (V[:, 1] < WHEEL_TOP_Y) & (np.abs(V[:, 0]) < 0.70)
+    tz, ty = V[T][:, :, 2], V[T][:, :, 1]
     idx = 1
     for bz, axles in bogies:
-        side = np.sign(bz)
-        near = (vmax < BODY_CUT_Y) & (V[:, 2] * side > BOGIE_ZONE_Z)
+        half = (max(axles) - min(axles)) / 2 + 0.341 + BOGIE_MARGIN
+        tri_in = (np.abs(tz - bz) < half).all(1) & (ty < BOGIE_TOP_Y).all(1)
+        near = np.zeros(len(V), bool); near[T[tri_in]] = True
+        outside = np.zeros(len(V), bool); outside[T[~tri_in]] = True
+        near &= ~outside          # a vertex shared with a body triangle stays with the body
         bone[near] = idx
         for k, az in enumerate(axles):
             at_axle = near & (np.abs(V[:, 2] - az) < 0.45) & (is_wheel_part | is_shaft)
@@ -216,7 +224,7 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
     tex_cids = {}
     for level, mi in (('', front[0]), ('_LOD1', front[1])):
         tex_cids[level] = []
-        for slot, (im, srgb) in convert_textures(b, E, material_for_mesh(E, mats, mi)).items():
+        for slot, (im, srgb) in convert_textures(b, E, material_for_mesh(E, mats, mi), lights=True).items():
             cid = did(name, level, slot)
             emit(fname(f'{name}{level}_{slot}', 'Texture'), lambda p, im=im, srgb=srgb: T.write(p, im, srgb), cid)
             tex_cids[level].append((SURFACE_SLOT[slot], cid))
@@ -237,7 +245,7 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
         for level, idx in (('_LOD1', lod_mi), ('', mi)):
             m = read(idx)
             tris, attrs, lo, hi, area = cs1_mesh_to_cs2(m)
-            comps = []
+            comps = [A.emissive_properties(LIGHTS if level == '' else LIGHTS_LOD)]
             if level == '':
                 V = np.asarray(m['V'], np.float32)
                 bones = assign_bones(V, tris.reshape(-1, 3), bogies, wheel_y)
@@ -246,7 +254,8 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
                 preview_parts[mi[0] if isinstance(mi, tuple) else mi] = (V, np.asarray(m['N']), np.asarray(m['UV']), tris.reshape(-1, 3), bones)
             s = stem + level
             geo_cid = did(name, s, 'geometry'); emit(fname(s, 'Geometry'), lambda p: G.write(p, tris, attrs), geo_cid)
-            surf_cid = did(name, s, 'surface'); emit(fname(s, 'Surface'), lambda p: A.write_surface(p, tex_cids[level]), surf_cid)
+            surf_cid = did(name, s, 'surface')
+            emit(fname(s, 'Surface'), lambda p: A.write_surface(p, tex_cids[level], keywords=SURFACE_KEYWORDS), surf_cid)
             rp_cid = did(name, s, 'renderprefab')
             rp = A.render_prefab(f'{s} Mesh', geo_cid, [surf_cid], lo, hi, area, len(tris), len(m['V']),
                                  lod_cids=[lod_cid] if lod_cid else [], components=comps)

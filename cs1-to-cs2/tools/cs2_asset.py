@@ -265,3 +265,15 @@ def train_front_prefab(name, mesh_cid, components, carriage_cids, speed=200, rev
         m_MinMultipleUnitCount=1, m_MaxMultipleUnitCount=1,
         m_Carriages=Arr('Game.Prefabs.MultipleUnitTrainCarriageInfo[], Game', cars),
         m_AddReversedEndCarriage=reversed_end))
+
+COLOR = 'UnityEngine.Color, UnityEngine.CoreModule'
+
+def emissive_properties(multi):
+    """multi: list of (purpose, color, colorOff, intensity, luminance, layerId)."""
+    items = [Obj('Game.Prefabs.EmissiveProperties+MultiLightMapping, Game', dict(
+        previewState=False, purpose=p, color=Bare(COLOR, list(c)), colorOff=Bare(COLOR, list(off)),
+        intensity=i, luminance=l, responseTime=0, animationIndex=-1, layerId=layer)) for p, c, off, i, l, layer in multi]
+    return Obj('Game.Prefabs.EmissiveProperties, Game', dict(
+        name='EmissiveProperties', active=True, m_SingleLights=None,
+        m_MultiLights=Arr('System.Collections.Generic.List`1[[Game.Prefabs.EmissiveProperties+MultiLightMapping, Game]], mscorlib', items),
+        m_AnimationCurves=None, m_SignalGroupAnimations=None))

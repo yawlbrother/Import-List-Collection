@@ -52,7 +52,7 @@ def material_for_mesh(E, mats, mesh_index):
             return mats[j]
     raise SystemExit(f'no material found after mesh {mesh_index}')
 
-def convert_textures(b, E, tex):
+def convert_textures(b, E, tex, lights=False):
     """CS1 MainTex/XYSMap/ACIMap -> CS2 slot images (PIL, top-row-first)."""
     main = C.read_texture(b, E[tex['_MainTex']])[2].convert('RGBA')
     xys = np.asarray(C.read_texture(b, E[tex['_XYSMap']])[2].convert('RGBA').resize(main.size)).astype(np.int32)
@@ -69,8 +69,17 @@ def convert_textures(b, E, tex):
         # R metallic, A smoothness (from CS1 specular)
         'MaskMap': (img(0, 0, 0, np.clip(xys[..., 2] * 0.75, 0, 255)), False),
         'ControlMask': (img(0, 0, 0, 0), False),
-        'Emissive': (img(0, 0, 0, 255), True),
+        'Emissive': (emissive(aci[..., 2], img) if lights else img(0, 0, 0, 255), True),
     }
+
+# CS2 emissive: RGB = light colour, A = light layer (matched by EmissiveProperties multi-light mappings)
+LAYER_DEFAULT, LAYER_HEADLAMP = 255, 25
+
+def emissive(illum, img):
+    """From CS1's illumination channel: 20-40 = lit windows, >200 = headlamps, else dark."""
+    win = (illum >= 20) & (illum <= 40); lamp = illum > 200
+    rgb = np.where(win | lamp, 255, 0)
+    return img(rgb, rgb, rgb, np.where(lamp, LAYER_HEADLAMP, LAYER_DEFAULT))
 
 def cs1_mesh_to_cs2(m):
     V = np.asarray(m['V'], np.float32); N = np.asarray(m['N'], np.float64)
