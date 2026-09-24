@@ -50,16 +50,38 @@ def _encode_bc7(img):
         img = Image.fromarray(a, 'RGBA')
     return etcpak.compress_bc7(img.tobytes(), pw, ph)
 
-def write(path, img, srgb, flip=True):
-    """img: PIL image in normal top-row-first orientation. Writes the full mip chain."""
+def _max_alpha_mip(a):
+    """Halve an RGBA array keeping, per 2x2 block, the texel with the highest alpha (ties: top-left).
+    Emissive maps store a light *layer id* in alpha, so averaging (the normal mip filter) turns
+    a window's layer into garbage a few mips down and the lights vanish on distant objects."""
+    h, w = a.shape[:2]
+    if h > 1 and w > 1:
+        q = np.stack([a[0::2, 0::2], a[0::2, 1::2], a[1::2, 0::2], a[1::2, 1::2]], 0)
+    elif h > 1:
+        q = np.stack([a[0::2], a[1::2]], 0)
+    else:
+        q = np.stack([a[:, 0::2], a[:, 1::2]], 0)
+    best = q[..., 3].argmax(0)
+    return np.take_along_axis(q, best[None, ..., None], 0)[0]
+
+def write(path, img, srgb, flip=True, mip_filter='lanczos'):
+    """img: PIL image in normal top-row-first orientation. Writes the full mip chain.
+    mip_filter: 'lanczos' (default) or 'max_alpha' (see _max_alpha_mip; use for emissive maps)."""
     img = img.convert('RGBA')
     if flip:
         img = img.transpose(Image.FLIP_TOP_BOTTOM)
     w, h = img.size
     sizes = mip_sizes(w, h)
     data = bytearray()
+    cur = np.asarray(img)
     for mw, mh in sizes:
-        m = img if (mw, mh) == (w, h) else img.resize((mw, mh), Image.LANCZOS)
+        if (mw, mh) != (w, h):
+            if mip_filter == 'max_alpha':
+                cur = _max_alpha_mip(cur); m = Image.fromarray(np.ascontiguousarray(cur), 'RGBA')
+            else:
+                m = img.resize((mw, mh), Image.LANCZOS)
+        else:
+            m = img
         blob = _encode_bc7(m)
         assert len(blob) == _blocks(mw, mh), (len(blob), mw, mh)
         data += blob
