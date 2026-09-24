@@ -32,12 +32,36 @@ BOGIE_TOP_Y = 1.0        # bogie frame and axle boxes stay below this
 BOGIE_MARGIN = 0.35      # bogie box reaches this far beyond the outer wheel rims
 WHEEL_TOP_Y = 0.72
 SURFACE_KEYWORDS = ('_EMISSIVE_PROCEDURAL', '_TANGENTSPACE_OCTO')
-# (purpose, colour, colour when the purpose is inactive, intensity, luminance, texture layer)
-# purposes and numbers copied from a working custom train: 23 = interior lights, 3 = headlamps
-LIGHTS = [(23, (1, 0.9974498, 0.745, 1), (0, 0, 0, 1), 0.05, 0.964706, 255),
-          (3, (1, 1, 1, 1), (0.8, 0, 0, 1), 1.0, 1.0, 25)]           # red tail lamps when not leading
-LIGHTS_LOD = [(0, (0.96, 0.96, 0.96, 1), (0, 0, 0, 1), 1.03658521, 0.964706, 255),
-              (3, (1, 1, 1, 1), (0.8, 0, 0, 1), 1.0, 1.0, 25)]
+WHITE, WARM, RED, BLACK = (1, 1, 1, 1), (1, 0.9974498, 0.745, 1), (1, 0, 0, 1), (0, 0, 0, 1)
+# Light groups: name -> (texture alpha = layer id, texture rgb, purpose, colour, intensity, luminance).
+# Purposes are still being pinned down empirically; each region gets its own so one night-time
+# look at the train shows which purpose does what.
+LIGHT_GROUPS = {
+    'lamps':      (25,  (255, 255, 255), 3,  WHITE, 1.0, 1.0),
+    'upper_win':  (51,  (255, 255, 255), 23, WARM,  0.3, 0.964706),
+    'lower_win':  (76,  (255, 255, 255), 0,  WARM,  0.3, 0.964706),
+    'side_win':   (102, (255, 40, 40),   6,  RED,   0.5, 1.0),
+    'windscreen': (127, (255, 255, 255), 2,  WHITE, 0.5, 1.0),
+}
+LIGHTS = [(p, c, BLACK, i, l, a) for a, _, p, c, i, l in LIGHT_GROUPS.values()]
+LIGHTS_LOD = LIGHTS
+
+def light_regions(aci):
+    """Classify texels from CS1's ACI map (blue = illumination): returns {group: bool mask}."""
+    I = np.asarray(aci.convert('RGBA')).astype(int)[..., 2]; H, W = I.shape
+    ys, xs = np.mgrid[0:H, 0:W]
+    win = (I >= 20) & (I <= 40); dark = I <= 10
+    screen = dark & (xs > 0.70 * W) & (xs < 0.85 * W) & (ys > 0.68 * H)
+    return {'lamps': I > 200, 'upper_win': win & (ys < 0.29 * H), 'lower_win': win & (ys >= 0.29 * H),
+            'side_win': dark & ~screen, 'windscreen': screen}
+
+def paint_emissive(aci):
+    """Emissive texture: RGB = lamp colour, A = layer id; alpha 0 (and black) everywhere else."""
+    regions = light_regions(aci); H, W = next(iter(regions.values())).shape
+    out = np.zeros((H, W, 4), np.uint8)
+    for name, (layer, rgb, *_ ) in LIGHT_GROUPS.items():
+        out[regions[name]] = (*rgb, layer)
+    return Image.fromarray(out, 'RGBA')
 
 # ---------------------------------------------------------------- CS1 vehicle data
 def vehicle_gen(b, E, mesh_index):
@@ -224,7 +248,10 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
     tex_cids = {}
     for level, mi in (('', front[0]), ('_LOD1', front[1])):
         tex_cids[level] = []
-        for slot, (im, srgb) in convert_textures(b, E, material_for_mesh(E, mats, mi), lights=True).items():
+        mat = material_for_mesh(E, mats, mi); slots = convert_textures(b, E, mat)
+        aci = C.read_texture(b, E[mat['_ACIMap']])[2].resize(slots['BaseColor'][0].size)
+        slots['Emissive'] = (paint_emissive(aci), True)
+        for slot, (im, srgb) in slots.items():
             cid = did(name, level, slot)
             emit(fname(f'{name}{level}_{slot}', 'Texture'), lambda p, im=im, srgb=srgb: T.write(p, im, srgb), cid)
             tex_cids[level].append((SURFACE_SLOT[slot], cid))
