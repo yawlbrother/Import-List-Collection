@@ -9,6 +9,7 @@ Personal toolkit for moving Cities: Skylines 1 assets into Cities: Skylines II.
 | `tools/crp_tool.py` | Reads CS1 `.crp` packages: `list`, `info` (metadata + vehicle stats), `extract` (meshes → OBJ, textures → PNG) |
 | `tools/cs2_geometry.py` | Reads and writes CS2 `.Geometry` files (meshopt + zstd streams) |
 | `tools/cok_tool.py` | Reads CS2 `.cok` packages: `tree` (prefab graph), `prefab` (dump one prefab as clean JSON) |
+| `windows/cs2_grab_samples.bat` | Read-only. Zips small reference files (plain .Texture, .Surface, .Geometry, .Prefab from ImportedData and a loose-file mod) to the Desktop, capped at 60 MB |
 | `windows/cs2_scout.bat` | Read-only. Run on the gaming PC; writes `cs2_scout_report.txt` to the Desktop describing the CS2 folders, installed packages, game version and Blender install |
 
 `pip install pillow meshoptimizer zstandard numpy`
