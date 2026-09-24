@@ -4,7 +4,8 @@ echo.
 echo  CS2 scout - read-only. Looks around your Cities: Skylines II folders
 echo  and writes a report to your Desktop. It does not change or delete anything.
 echo.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$f='%~f0'; iex ((Get-Content -LiteralPath $f -Raw) -replace '(?s)^.*?#>','')"
+set "SCOUT_SELF=%~f0"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iex (Get-Content -LiteralPath $env:SCOUT_SELF -Raw)"
 echo.
 pause
 exit /b
