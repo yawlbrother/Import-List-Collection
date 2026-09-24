@@ -24,6 +24,12 @@ Build a prop from a CS1 asset (output goes to `dist/`, which is git-ignored beca
     cd tools
     python build_prop.py ASSET.crp --mesh 33 --lod 36 --name SJX40DisplayTest --title "SJ X40 display (CS1 port test)" --out ../dist
 
+Build a train (front car, then carriages in order; the game mirrors the front car onto the back; a MESH:LOD may repeat):
+
+    python build_train.py ASSET.crp --name SJX40 --title "SJ X40 (CS1 port)" --front 33:36 --car 0:6 --car 15:18 --out ../dist
+    python build_train.py ASSET.crp --name SJX40x12 --title "SJ X40 12-car" --front 33:36 \
+        --car 0:6 --car 33:36 --car 0:6 --car 33:36 --car 0:6 --car 33:36 --car 0:6 --car 33:36 --car 0:6 --car 15:18 --out ../dist
+
 ## Format notes
 
 ### CS1 `.crp`

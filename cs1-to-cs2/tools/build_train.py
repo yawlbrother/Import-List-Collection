@@ -6,7 +6,9 @@
 
 --front / --car take MESH:LOD entry indices from `crp_tool.py list`. Cars are listed in
 consist order behind the front car; the game mirrors the front car onto the back
-(m_AddReversedEndCarriage). Bogies are found from the CS1 wheel data (VehicleInfoGen
+(m_AddReversedEndCarriage). The same MESH:LOD may appear several times (one carriage
+prefab is written and referenced at every position), and the front car's mesh may be
+used as a carriage too. Bogies are found from the CS1 wheel data (VehicleInfoGen
 m_tyres) and become Wheelset/Axle bones; vertices below the body skirt near a bogie
 are skinned to it, wheel discs to their axle.
 """
@@ -136,9 +138,12 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group):
             tex_cids[level].append((SURFACE_SLOT[slot], cid))
             if level == '' and slot == 'BaseColor': base_img = im
 
-    preview_parts = []
+    preview_parts = {}      # mesh index -> (V, N, UV, tris, bones)
+    mesh_cache = {}         # (mesh, lod) -> LOD0 render prefab cid
     def build_mesh(stem, mi, lod_mi, bogies, wheel_y):
         """Writes LOD1 + LOD0 geometry, surfaces and render prefabs; returns LOD0 render prefab cid."""
+        if (mi, lod_mi) in mesh_cache:
+            return mesh_cache[(mi, lod_mi)]
         lod_cid = None
         for level, idx in (('_LOD1', lod_mi), ('', mi)):
             m = C.read_mesh(b, E[idx])
@@ -149,7 +154,7 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group):
                 bones = assign_bones(V, tris.reshape(-1, 3), bogies, wheel_y)
                 attrs['blendindices'] = (10, bones[:, None])
                 comps.append(A.procedural_animation(bone_list(stem, bogies, wheel_y)))
-                preview_parts.append((V, np.asarray(m['N']), np.asarray(m['UV']), tris.reshape(-1, 3), bones))
+                preview_parts[mi] = (V, np.asarray(m['N']), np.asarray(m['UV']), tris.reshape(-1, 3), bones)
             s = stem + level
             geo_cid = did(name, s, 'geometry'); emit(fname(s, 'Geometry'), lambda p: G.write(p, tris, attrs), geo_cid)
             surf_cid = did(name, s, 'surface'); emit(fname(s, 'Surface'), lambda p: A.write_surface(p, tex_cids[level]), surf_cid)
@@ -158,29 +163,33 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group):
                                  lod_cids=[lod_cid] if lod_cid else [], components=comps)
             emit(os.path.join(name, fname(f'{s} Mesh', 'Prefab')), lambda p: A.write_prefab(p, rp), rp_cid)
             lod_cid = rp_cid
+        mesh_cache[(mi, lod_mi)] = lod_cid
         return lod_cid
 
-    car_cids = []
-    for n, (mi, lod_mi) in enumerate(cars, 1):
-        stem = f'{name}_Car{n}'
-        tyres = vehicle_gen(b, E, mi); bogies, wheel_y, _ = bogies_from_tyres(tyres)
-        doors, _ = vehicle_data(b, E, mi)
-        mesh_cid = build_mesh(stem, mi, lod_mi, bogies, wheel_y)
-        comps = [A.public_transport(capacity), A.vehicle_side_effects(),
-                 A.activity_location(ACTIVITY_BOARD, [(np.sign(x) * 1.3, 0.7, z) for x, y, z in doors]),
-                 A.effect_source([(EFFECT_TRAIN, (0, 4, 0), (0, -1, 0, 0))])]
-        cid = did(name, stem, 'car'); car = A.train_car_prefab(stem, mesh_cid, comps, speed)
-        emit(os.path.join(name, fname(stem, 'Prefab')), lambda p: A.write_prefab(p, car), cid)
-        emit(os.path.join(name, f'{fname(stem, "Prefab")[:-7]}_en-US.loc'),
-             lambda p: A.write_loc(p, {f'Assets.NAME[{stem}]': f'{title} car {n + 1}'}), did(name, stem, 'loc'))
-        car_cids.append((cid, 0))
-
-    # front car
+    # front car mesh first so a carriage that reuses it shares the render prefab
     mi, lod_mi = front
     tyres = vehicle_gen(b, E, mi); bogies, wheel_y, _ = bogies_from_tyres(tyres)
     doors, lights = vehicle_data(b, E, mi)
     mesh_cid = build_mesh(name, mi, lod_mi, bogies, wheel_y)
-    V = preview_parts[-1][0]; nose_z = float(V[:, 2].max())
+
+    # one carriage prefab per distinct mesh, referenced at every consist position it occupies
+    car_cid = {}
+    for k, (cmi, clod) in enumerate(dict.fromkeys(cars)):
+        stem = f'{name}_Car{chr(65 + k)}'
+        ctyres = vehicle_gen(b, E, cmi); cbogies, cwheel_y, _ = bogies_from_tyres(ctyres)
+        cdoors, _ = vehicle_data(b, E, cmi)
+        cmesh_cid = build_mesh(stem, cmi, clod, cbogies, cwheel_y)
+        comps = [A.public_transport(capacity), A.vehicle_side_effects(),
+                 A.activity_location(ACTIVITY_BOARD, [(np.sign(x) * 1.3, 0.7, z) for x, y, z in cdoors]),
+                 A.effect_source([(EFFECT_TRAIN, (0, 4, 0), (0, -1, 0, 0))])]
+        cid = did(name, stem, 'car'); car = A.train_car_prefab(stem, cmesh_cid, comps, speed)
+        emit(os.path.join(name, fname(stem, 'Prefab')), lambda p: A.write_prefab(p, car), cid)
+        emit(os.path.join(name, f'{fname(stem, "Prefab")[:-7]}_en-US.loc'),
+             lambda p: A.write_loc(p, {f'Assets.NAME[{stem}]': f'{title} car {chr(65 + k)}'}), did(name, stem, 'loc'))
+        car_cid[(cmi, clod)] = cid
+    car_cids = [(car_cid[c], 0) for c in cars]
+
+    V = preview_parts[mi][0]; nose_z = float(V[:, 2].max())
     def nose_surface(x, y):
         sel = V[(np.abs(V[:, 0] - x) < 0.15) & (np.abs(V[:, 1] - y) < 0.15)]
         return float(sel[:, 2].max()) + 0.05 if len(sel) else nose_z
@@ -189,7 +198,7 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group):
 
     # icon + preview: whole consist, front car mirrored onto the back like the game does
     parts = []; z0 = 0.0
-    order = [preview_parts[-1]] + preview_parts[:-1] + [preview_parts[-1]]
+    order = [preview_parts[mi]] + [preview_parts[c[0]] for c in cars] + [preview_parts[mi]]
     for k, (Vp, Np, UVp, Tp, _) in enumerate(order):
         Vp = Vp.astype(np.float64).copy(); Np = Np.astype(np.float64).copy()
         if k == len(order) - 1: Vp[:, [0, 2]] *= -1; Np[:, [0, 2]] *= -1
@@ -198,8 +207,10 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group):
     icon = preview.crop_to_content(preview.render([parts[0]], 900, 900, 40, -14, 48, 30, (parts[0][0].min(0) + parts[0][0].max(0)) / 2), square=True)
     icon_cid = did(name, 'icon')
     emit(fname(name, 'jpg'), lambda p: icon.resize((256, 256), Image.LANCZOS).save(p, 'JPEG', quality=90), icon_cid, base=icon_dir)
-    preview.crop_to_content(preview.render(parts, 2400, 600, 62, -9, size * 1.15, 32, ctr)).save(os.path.join(root, 'preview.png'))
-    bone_img = bone_preview(preview_parts[-1]); bone_img.save(os.path.join(root, 'bones.png'))
+    pw = 600 + 300 * len(order)
+    preview.crop_to_content(preview.render(parts, pw, pw // 4, 62, -9, size * 1.15, 32, ctr)).save(os.path.join(root, 'preview.png'))
+    preview.crop_to_content(preview.render(parts, pw, pw // 8, 90, 0, size * 1.1, 30, ctr)).save(os.path.join(root, 'preview_side.png'))
+    bone_img = bone_preview(preview_parts[mi]); bone_img.save(os.path.join(root, 'bones.png'))
 
     comps = [A.public_transport(capacity), A.vehicle_side_effects(),
              A.activity_location(ACTIVITY_BOARD, [(np.sign(x) * 1.3, 0.7, z) for x, y, z in doors]),

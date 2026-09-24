@@ -89,7 +89,7 @@ def _num(v):
     if isinstance(v, bool): return 'true' if v else 'false'
     if isinstance(v, int): return str(v)
     if isinstance(v, float):
-        if abs(v) < 1e-6: v = 0.0
+        if abs(v) <= 1e-6: v = 0.0
         return repr(int(v)) if v.is_integer() else repr(v).replace('e', 'E')   # C# writes 1E-06
     return json.dumps(v, ensure_ascii=False)
 
