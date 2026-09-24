@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Read and write Cities: Skylines II .Geometry files.
 
-Layout (little-endian, 138-byte header for a single-submesh mesh):
-  0   u16 1, u16 1, u16 0, u32 3            (constant in every sample seen)
+Layout (little-endian). Prefix: u16 1, u16 mesh count, u16 0, u32 3. Then one 88-byte
+descriptor per mesh (offsets below are for a single mesh, i.e. descriptor at 10), then per
+mesh its submesh table + bounds, then every stream (mesh by mesh). One mesh per material.
   10  7 bytes: vertex-attribute format, one nibble per Unity VertexAttribute
       slot (low nibble first), 0xF = attribute absent. Unity VertexAttributeFormat:
       0 Float32, 1 Float16, 2 UNorm8, 3 SNorm8, 4 UNorm16, 5 SNorm16, 6 UInt8,
@@ -15,7 +16,7 @@ Layout (little-endian, 138-byte header for a single-submesh mesh):
   86  u32 vertex count, u32 index count
   94  u32 submesh count (1), then per submesh: index start, index count, first vertex, vertex count
   114 6 x f32 bounds: center xyz, extents xyz
-Payload: index stream then each present attribute stream in slot order.
+Payload: every mesh's index stream, then slot by slot each mesh's stream for that slot.
 Every stream is meshoptimizer-encoded (index codec v1 / vertex codec v0) and then
 zstd-compressed as its own frame. Indices are 32-bit.
 
@@ -76,66 +77,85 @@ def _frames(buf, pos):
         out.append(data); pos += used
     return out
 
-def read(path):
+def read_all(path):
+    """Returns a list of meshes (one per material slot)."""
     b = open(path, 'rb').read()
-    fmt_nibbles = [(b[10 + i // 2] >> (4 * (i % 2))) & 0xF for i in range(14)]
-    dims_bits = struct.unpack_from('<I', b, 18)[0]
-    sizes = struct.unpack_from('<14I', b, 22)
-    nv, ni, nsub = struct.unpack_from('<3I', b, 86)
-    if nsub != 1:
-        raise NotImplementedError(f'{nsub} submeshes')
-    sub = struct.unpack_from('<4I', b, 98)
-    bounds = struct.unpack_from('<6f', b, 114)
-    frames = _frames(b, HEADER)
-    mesh = dict(vertex_count=nv, index_count=ni, submesh=sub, center=bounds[:3], extents=bounds[3:], attrs={})
-    mesh['indices'] = mo.decode_index_buffer(ni, 4, frames[0]).astype(np.uint32)
-    k = 1
+    one, count, zero, three = struct.unpack_from('<HHHI', b, 0)
+    pos, descs = 10, []
+    for _ in range(count):
+        fmt = [(b[pos + i // 2] >> (4 * (i % 2))) & 0xF for i in range(14)]
+        dims = struct.unpack_from('<I', b, pos + 8)[0]
+        nv, ni, nsub = struct.unpack_from('<3I', b, pos + 76)
+        descs.append((fmt, dims, nv, ni, nsub)); pos += 88
+    meshes = []
+    for fmt, dims, nv, ni, nsub in descs:
+        subs = [struct.unpack_from('<4I', b, pos + 16 * i) for i in range(nsub)]; pos += 16 * nsub
+        bounds = struct.unpack_from('<6f', b, pos); pos += 24
+        meshes.append(dict(vertex_count=nv, index_count=ni, submeshes=subs, center=bounds[:3], extents=bounds[3:],
+                           _fmt=fmt, _dims=dims, attrs={}))
+    # stream order: every mesh's index stream, then slot by slot, each mesh's stream for that slot
+    frames = iter(_frames(b, pos))
+    for m in meshes:
+        m['indices'] = mo.decode_index_buffer(m['index_count'], 4, next(frames)).astype(np.uint32)
     for slot in range(14):
-        if fmt_nibbles[slot] == 0xF:
-            continue
-        dim = ((dims_bits >> (2 * slot)) & 3) + 1
-        dt = np.dtype(FORMATS[fmt_nibbles[slot]])
-        stride = dim * dt.itemsize
-        raw = mo.decode_vertex_buffer(nv, stride, frames[k]).tobytes(); k += 1
-        mesh['attrs'][SLOTS[slot]] = (fmt_nibbles[slot], np.frombuffer(raw, dt).reshape(nv, dim).copy())
-    return mesh
+        for m in meshes:
+            f = m['_fmt'][slot]
+            if f == 0xF:
+                continue
+            dim = ((m['_dims'] >> (2 * slot)) & 3) + 1
+            dt = np.dtype(FORMATS[f])
+            raw = mo.decode_vertex_buffer(m['vertex_count'], dim * dt.itemsize, next(frames)).tobytes()
+            m['attrs'][SLOTS[slot]] = (f, np.frombuffer(raw, dt).reshape(m['vertex_count'], dim).copy())
+    for m in meshes:
+        del m['_fmt'], m['_dims']
+    return meshes
+
+def read(path):
+    """Single-mesh convenience wrapper."""
+    meshes = read_all(path)
+    if len(meshes) != 1:
+        raise ValueError(f'{len(meshes)} meshes; use read_all')
+    m = meshes[0]; m['submesh'] = m['submeshes'][0]
+    return m
 
 # ---------------------------------------------------------------- write
-def write(path, indices, attrs, level=19):
-    """attrs: {slot_name: (format_id, array[n, dim])} using the raw stored types."""
-    indices = np.ascontiguousarray(indices, np.uint32).ravel()
-    nv = next(iter(attrs.values()))[1].shape[0]
-    fmt = [0xF] * 14; dims = 0; sizes = [0] * 14; payload = []
+def write_all(path, meshes, level=19):
+    """meshes: list of dicts with 'indices' and 'attrs' {slot_name: (format_id, array[n, dim])}."""
     zc = zstandard.ZstdCompressor(level=level)
     mo.encode_index_version(1); mo.encode_vertex_version(0)
-    idx_blob = zc.compress(mo.encode_index_buffer(indices, len(indices), nv))
-    for slot, name in enumerate(SLOTS):
-        if name not in attrs:
-            continue
-        f, arr = attrs[name]
-        arr = np.ascontiguousarray(arr, FORMATS[f])
-        if arr.ndim == 1: arr = arr[:, None]
-        assert arr.shape[0] == nv and (arr.shape[1] * arr.itemsize) % 4 == 0, name
-        fmt[slot] = f; dims |= (arr.shape[1] - 1) << (2 * slot)
-        blob = zc.compress(mo.encode_vertex_buffer(arr.view(np.uint8).reshape(nv, -1), nv, arr.shape[1] * arr.itemsize))
-        sizes[slot] = len(blob); payload.append(blob)
-    pos = attrs['position'][1].astype(np.float64)
-    lo, hi = pos.min(0), pos.max(0)
-    h = bytearray()
-    h += struct.pack('<HHHI', 1, 1, 0, 3)
-    h += bytes(fmt[i] | (fmt[i + 1] << 4) for i in range(0, 14, 2)) + b'\x00'
-    h += struct.pack('<I', dims) + struct.pack('<14I', *sizes)
-    h += struct.pack('<II', len(idx_blob), 0)
-    h += struct.pack('<3I', nv, len(indices), 1) + struct.pack('<4I', 0, len(indices), 0, nv)
-    h += struct.pack('<6f', *((lo + hi) / 2), *((hi - lo) / 2))
-    assert len(h) == HEADER
+    descs, tails, idx_blobs, slot_blobs = b'', b'', [], [[] for _ in SLOTS]
+    for m in meshes:
+        indices = np.ascontiguousarray(m['indices'], np.uint32).ravel()
+        attrs = m['attrs']
+        nv = attrs['position'][1].shape[0]
+        fmt = [0xF] * 14; dims = 0; sizes = [0] * 14
+        idx_blob = zc.compress(mo.encode_index_buffer(indices, len(indices), nv))
+        for slot, name in enumerate(SLOTS):
+            if name not in attrs:
+                continue
+            f, arr = attrs[name]
+            arr = np.ascontiguousarray(arr, FORMATS[f])
+            if arr.ndim == 1: arr = arr[:, None]
+            assert arr.shape[0] == nv and (arr.shape[1] * arr.itemsize) % 4 == 0, name
+            fmt[slot] = f; dims |= (arr.shape[1] - 1) << (2 * slot)
+            blob = zc.compress(mo.encode_vertex_buffer(arr.view(np.uint8).reshape(nv, -1), nv, arr.shape[1] * arr.itemsize))
+            sizes[slot] = len(blob); slot_blobs[slot].append(blob)
+        pos = attrs['position'][1].astype(np.float64); lo, hi = pos.min(0), pos.max(0)
+        descs += bytes(fmt[i] | (fmt[i + 1] << 4) for i in range(0, 14, 2)) + b'\x00'
+        descs += struct.pack('<I', dims) + struct.pack('<14I', *sizes) + struct.pack('<II', len(idx_blob), 0)
+        descs += struct.pack('<3I', nv, len(indices), 1)
+        tails += struct.pack('<4I', 0, len(indices), 0, nv) + struct.pack('<6f', *((lo + hi) / 2), *((hi - lo) / 2))
+        idx_blobs.append(idx_blob)
+    payload = b''.join(idx_blobs) + b''.join(b''.join(s) for s in slot_blobs)
     with open(path, 'wb') as f:
-        f.write(bytes(h) + idx_blob + b''.join(payload))
-    return dict(vertex_count=nv, index_count=len(indices), center=(lo + hi) / 2, extents=(hi - lo) / 2)
+        f.write(struct.pack('<HHHI', 1, len(meshes), 0, 3) + descs + tails + payload)
+
+def write(path, indices, attrs, level=19):
+    write_all(path, [dict(indices=indices, attrs=attrs)], level)
 
 if __name__ == '__main__':
     import sys
-    m = read(sys.argv[1])
-    print({k: v for k, v in m.items() if k not in ('attrs', 'indices')})
-    for k, (f, a) in m['attrs'].items():
-        print(f'  {k:13} format {f:2} dims {a.shape[1]} dtype {a.dtype}')
+    for i, m in enumerate(read_all(sys.argv[1])):
+        print(i, {k: v for k, v in m.items() if k not in ('attrs', 'indices')})
+        for k, (f, a) in m['attrs'].items():
+            print(f'  {k:13} format {f:2} dims {a.shape[1]} dtype {a.dtype}')
