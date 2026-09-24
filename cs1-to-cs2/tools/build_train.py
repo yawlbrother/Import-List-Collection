@@ -34,43 +34,34 @@ WHEEL_TOP_Y = 0.72
 SURFACE_KEYWORDS = ('_EMISSIVE_PROCEDURAL', '_TANGENTSPACE_OCTO')
 WHITE, WARM, RED, BLACK = (1, 1, 1, 1), (1, 0.9974498, 0.745, 1), (1, 0, 0, 1), (0, 0, 0, 1)
 # ---------------------------------------------------------------- lights
-# Emissive texture layers: name -> (alpha = layer id, texture rgb). The game turns the alpha into a
-# 1-based index into the render prefab's multi-light list; the exact formula is unverified (KISS uses
-# 25/51/76... = k*25.5, but ceil(alpha*count/255) fits the evidence too), so the list is padded to 10
-# lights and the alphas sit where both formulas agree: 20 -> 1, 45 -> 2, 70 -> 3, 95 -> 4.
-LIGHT_LAYERS = {
-    'windows_upper': (20, (255, 214, 150)),
-    'windows_lower': (45, (255, 214, 150)),
-    'lamps_white':   (70, (255, 255, 255)),
-    'lamps_red':     (95, (255, 40, 40)),
-}
-FILLER_LAYERS = (120, 145, 170, 195, 220, 245)
+# Lights. The emissive texture's RGB is the light colour and its alpha marks lit texels (255).
+# WHICH light a texel belongs to is not in the texture: it is the per-vertex colour attribute of
+# the geometry (the game's importer writes the 1-based index of the light into it; the KISS body has
+# colour (1,0,0,0) on its 176 window vertices, its headlight mesh (1|2|3,0,0,0) on the lamp quads).
+# Without that attribute the shader reads Unity's default white and every lit texel picks the LAST
+# light. All four channels get the same index here so it works whichever channel the shader reads.
 # Purposes (Game.Prefabs.EmissiveProperties.Purpose): 23 Interior1 = on at night (needs the car's
-# InteriorLights flag), 3 Headlight_LowBeam = leading car, 6 RearLight = trailing car, 1 = always on.
-WINDOW_INTENSITY = 0.02
-LAMP_INTENSITY = 0.2
+# InteriorLights flag, which every car gets), 3 Headlight_LowBeam = leading car, 6 RearLight =
+# trailing car. Intensity/luminance = KISS values. layerId is only read by the editor.
+LIGHT_GROUPS = {   # name -> (light index, texture rgb, purpose, colour, intensity, luminance, layerId)
+    'windows':     (1, (255, 214, 150), 23, WARM,  0.05, 0.964706, 255),
+    'lamps_red':   (2, (255, 40, 40),   6,  RED,   1.0,  1.0,      51),
+    'lamps_white': (3, (255, 255, 255), 3,  WHITE, 1.0,  1.0,      25),
+}
+LIT_ALPHA = 255
 
-def light_table(overrides=None):
-    """EmissiveProperties multi-light list, in layer order, padded with unused lights.
-    overrides: {layer name: purpose} for diagnostic builds."""
-    base = [('windows_upper', 23, WARM, WINDOW_INTENSITY, 0.964706),
-            ('windows_lower', 23, WARM, WINDOW_INTENSITY / 4, 0.964706),   # calibration: lower deck dimmer
-            ('lamps_white', 3, WHITE, LAMP_INTENSITY, 1.0),
-            ('lamps_red', 6, RED, LAMP_INTENSITY, 1.0)]
-    out = [((overrides or {}).get(n, p), c, BLACK, i, l, LIGHT_LAYERS[n][0]) for n, p, c, i, l in base]
-    return out + [(0, BLACK, BLACK, 0.0, 0.0, a) for a in FILLER_LAYERS]
+def light_table():
+    """EmissiveProperties multi-light list, in light-index order."""
+    return [(p, c, BLACK, i, l, layer) for _, _, p, c, i, l, layer in sorted(LIGHT_GROUPS.values())]
 
-UPPER_DECK_ROWS = 0.29   # window texels above this fraction of the atlas height are the upper deck
 RED_FRACTION = 0.4       # bottom part of a combined head/tail lamp lens that glows red
 UPPER_LAMP_GAP = 0.8     # lamps this much above the lowest lamp are roof lamps: white only
 
 def light_regions(aci):
     """From CS1's ACI map (blue = illumination): lit passenger windows (16-40) and lamp lenses (>200).
     Illumination 0 (door windows, windscreen, displays) stays dark, as the CS1 author intended."""
-    I = np.asarray(aci.convert('RGBA')).astype(int)[..., 2]; H = I.shape[0]
-    win = (I >= 16) & (I <= 40); rows = np.arange(H)[:, None]
-    return {'windows': win, 'windows_upper': win & (rows < UPPER_DECK_ROWS * H),
-            'windows_lower': win & (rows >= UPPER_DECK_ROWS * H), 'lamps': I > 200}
+    I = np.asarray(aci.convert('RGBA')).astype(int)[..., 2]
+    return {'windows': (I >= 16) & (I <= 40), 'lamps': I > 200}
 
 def bbox(mask):
     ys, xs = np.nonzero(mask)
@@ -188,12 +179,13 @@ def copy_lamp_texels(slots, lay):
             im.paste(im.crop((x0 - 2, y0 - 2, x1 + 2, y1 + 2)), (cx, cy))
 
 def paint_emissive(lay):
-    """Emissive texture: RGB = light colour, A = layer id; alpha 0 (and black) everywhere else."""
-    R = lay['regions']; H, W = R['windows'].shape; out = np.zeros((H, W, 4), np.uint8)
+    """Emissive texture (RGB = light colour, A = 255 on lit texels, 0 elsewhere) and the light index
+    map (uint8 per texel: 0 = unlit, else the light's 1-based index) used for the vertex colours."""
+    R = lay['regions']; H, W = R['windows'].shape; out = np.zeros((H, W, 4), np.uint8); idx = np.zeros((H, W), np.uint8)
     lamps, box, red_top = R['lamps'], lay['box'], lay['red_top']
     def paint(mask, group):
-        layer, rgb = LIGHT_LAYERS[group]; out[mask] = (*rgb, layer)
-    paint(R['windows_upper'], 'windows_upper'); paint(R['windows_lower'], 'windows_lower')
+        index, rgb = LIGHT_GROUPS[group][:2]; out[mask] = (*rgb, LIT_ALPHA); idx[mask] = index
+    paint(R['windows'], 'windows')
     if box is not None:
         x0, y0, x1, y1 = box; rows = np.arange(H)[:, None]
         paint(lamps, 'lamps_white')
@@ -205,7 +197,46 @@ def paint_emissive(lay):
             cx, cy = lay['copy']; patch = np.zeros((H, W), bool)
             patch[cy + 2:cy + 2 + (y1 - y0), cx + 2:cx + 2 + (x1 - x0)] = lamps[y0:y1, x0:x1]
             paint(patch, 'lamps_white')
+    lay['index_map'] = idx
     return Image.fromarray(out, 'RGBA')
+
+def triangle_light_index(m, index_map):
+    """Per-triangle light index: the most common non-zero index among the texels the triangle covers
+    in UV space (a body panel triangle that merely contains window texels counts as a window
+    triangle: its unlit texels have alpha 0 anyway). 0 when it covers no lit texel."""
+    H, W = index_map.shape; u, v = uv_pixels(m, W, H); t3 = tri_array(m); out = np.zeros(len(t3), np.uint8)
+    nlights = int(index_map.max()) + 1
+    for i, (a, b_, c) in enumerate(t3):
+        xs = np.array([u[a], u[b_], u[c]]); ys = np.array([v[a], v[b_], v[c]])
+        x0, x1 = max(int(np.floor(xs.min())), 0), min(int(np.ceil(xs.max())), W - 1)
+        y0, y1 = max(int(np.floor(ys.min())), 0), min(int(np.ceil(ys.max())), H - 1)
+        if x0 > x1 or y0 > y1:
+            continue
+        sub = index_map[y0:y1 + 1, x0:x1 + 1]
+        if not sub.any():
+            continue
+        den = (ys[1] - ys[2]) * (xs[0] - xs[2]) + (xs[2] - xs[1]) * (ys[0] - ys[2])
+        if abs(den) < 1e-9:
+            continue
+        gy, gx = np.mgrid[y0:y1 + 1, x0:x1 + 1]
+        w0 = ((ys[1] - ys[2]) * (gx - xs[2]) + (xs[2] - xs[1]) * (gy - ys[2])) / den
+        w1 = ((ys[2] - ys[0]) * (gx - xs[2]) + (xs[0] - xs[2]) * (gy - ys[2])) / den
+        inside = (w0 >= -0.02) & (w1 >= -0.02) & (1 - w0 - w1 >= -0.02)
+        hit = sub[inside]; hit = hit[hit > 0]
+        if len(hit):
+            out[i] = np.bincount(hit, minlength=nlights)[1:].argmax() + 1
+    return out
+
+def vertex_light_colors(m, index_map):
+    """Per-vertex colour attribute (n, 4) uint8: the light index its triangles' lit texels belong to
+    (majority vote over the vertex's triangles), in all four channels; 0 on unlit surfaces."""
+    t3 = tri_array(m); tri_idx = triangle_light_index(m, index_map); n = len(m['V'])
+    nlights = int(index_map.max()) + 1; votes = np.zeros((n, nlights), np.int32)
+    for k in range(3):
+        np.add.at(votes, (t3[:, k], tri_idx), 1)
+    votes[:, 0] = 0
+    idx = np.where(votes.sum(1) > 0, votes.argmax(1), 0).astype(np.uint8)
+    return np.repeat(idx[:, None], 4, 1)
 
 # ---------------------------------------------------------------- CS1 vehicle data
 def vehicle_gen(b, E, mesh_index):
@@ -373,7 +404,7 @@ def splice_middle(b, E, minus, plus):
     return mesh, lod, tyres, doors
 
 # ---------------------------------------------------------------- build
-def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=None, diag=False):
+def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=None):
     b, hdr, E = C.parse(crp)
     mats = cs1_materials(b, E)
     root = os.path.join(out, name); shutil.rmtree(root, ignore_errors=True)
@@ -421,7 +452,7 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
 
     preview_parts = {}      # car key -> (V, N, UV, tris, bones)
     mesh_cache = {}         # car key -> LOD0 render prefab cid
-    def build_mesh(stem, key, bogies, wheel_y, lights):
+    def build_mesh(stem, key, bogies, wheel_y):
         """Writes LOD1 + LOD0 geometry, surfaces and render prefabs; returns LOD0 render prefab cid."""
         if key in mesh_cache:
             return mesh_cache[key]
@@ -429,7 +460,10 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
         for level in ('_LOD1', ''):
             m = apply_lamp_layout(meshes[level][key], key, layouts[level])
             tris, attrs, lo, hi, area = cs1_mesh_to_cs2(m)
-            comps = [A.emissive_properties(lights)]
+            n = len(m['V'])
+            attrs['color'] = (2, vertex_light_colors(m, layouts[level]['index_map']))
+            attrs['uv1'] = attrs['uv2'] = (1, np.zeros((n, 2), np.float16)); attrs['uv3'] = (0, np.zeros((n, 2), np.float32))
+            comps = [A.emissive_properties(light_table())]
             if level == '':
                 V = np.asarray(m['V'], np.float32)
                 bones = assign_bones(V, tris.reshape(-1, 3), bogies, wheel_y)
@@ -452,7 +486,7 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
     mi = front[0]
     tyres = vehicle_gen(b, E, mi); bogies, wheel_y, _ = bogies_from_tyres(tyres)
     doors, lights = vehicle_data(b, E, mi)
-    mesh_cid = build_mesh(name, front, bogies, wheel_y, light_table())
+    mesh_cid = build_mesh(name, front, bogies, wheel_y)
 
     # one carriage prefab per distinct mesh, referenced at every consist position it occupies
     car_cid = {}
@@ -463,10 +497,7 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
         else:
             ctyres = vehicle_gen(b, E, car[0]); cdoors, _ = vehicle_data(b, E, car[0])
         cbogies, cwheel_y, _ = bogies_from_tyres(ctyres)
-        # --diag: the first carriage type's upper-deck windows become purpose 1 (always on, no flags
-        # needed) to show whether the game animates carriage lights at all
-        table = light_table({'windows_upper': 1} if diag and k == 0 else None)
-        cmesh_cid = build_mesh(stem, car, cbogies, cwheel_y, table)
+        cmesh_cid = build_mesh(stem, car, cbogies, cwheel_y)
         comps = [A.public_transport(capacity), A.vehicle_side_effects(),
                  A.activity_location(ACTIVITY_BOARD, [(np.sign(x) * 1.3, 0.7, z) for x, y, z in cdoors]),
                  A.effect_source([(EFFECT_TRAIN, (0, 4, 0), (0, -1, 0, 0))])]
@@ -544,10 +575,9 @@ if __name__ == '__main__':
                                      'their flat halves are joined into a cabless middle car usable as --car mid')
     ap.add_argument('--speed', type=int, default=200); ap.add_argument('--capacity', type=int, default=70)
     ap.add_argument('--out', default='dist'); ap.add_argument('--ui-group', default=None)
-    ap.add_argument('--diag', action='store_true', help='diagnostic light purposes on the first carriage type')
     a = ap.parse_args()
     pair = lambda s: tuple(int(x) for x in s.split(':'))
     middle = tuple(pair(x) for x in a.middle.split('+')) if a.middle else None
     root, z = build(a.crp, a.name, a.title, a.out, pair(a.front), [c if c == 'mid' else pair(c) for c in a.car],
-                    a.speed, a.capacity, a.ui_group, middle, a.diag)
+                    a.speed, a.capacity, a.ui_group, middle)
     print('built', root); print('zip  ', z, os.path.getsize(z) // 1024, 'KB')
