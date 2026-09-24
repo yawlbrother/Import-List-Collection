@@ -65,6 +65,17 @@ if (Test-Path $ud) {
         ForEach-Object { Say ('{0,6} prefabs  {1}' -f $_.Count, $_.Name.Replace($ud, '<CS2>')) }
 }
 
+Head '4b. File type census (what formats installed assets use)'
+if (Test-Path $ud) {
+    $all = Get-ChildItem -LiteralPath $ud -Recurse -File -Force |
+        Where-Object { $_.FullName -notmatch '\\(Saves|Screenshots|Logs|Crashes)\\' }
+    $all | Group-Object Extension | Sort-Object Count -Descending | Select-Object -First 30 |
+        ForEach-Object { Say ('{0,8}  {1,-14} {2}' -f $_.Count, $_.Name, (MB (($_.Group | Measure-Object Length -Sum).Sum))) }
+    Say '  --- example folders holding plain .Texture files (first 10) ---'
+    $all | Where-Object { $_.Extension -eq '.Texture' } | Group-Object DirectoryName |
+        Select-Object -First 10 | ForEach-Object { Say ('{0,6}  {1}' -f $_.Count, $_.Name.Replace($ud, '<CS2>')) }
+}
+
 Head '5. The Caltrain KISS reference asset - where the game keeps it'
 if (Test-Path $ud) {
     Get-ChildItem -LiteralPath $ud -Recurse -Force -Filter 'kisscaltrain01*' |
