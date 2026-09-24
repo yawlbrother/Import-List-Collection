@@ -214,7 +214,7 @@ try {
     $log | Set-Content -LiteralPath (Join-Path $logDir ($name + '.installed.txt')) -Encoding UTF8
     Write-Host (" Copied {0} files into {1}" -f $log.Count, $target)
     Write-Host ""
-    Write-Host " Done. Start the game and look in the same menu as your ModernCentralStation asset."
+    Write-Host " Done. Start the game. __WHERE__"
     Write-Host " To remove it later, run uninstall.bat."
 } catch {
     Write-Host ""
@@ -247,18 +247,19 @@ try {
 }
 '''
 
-def write_scripts(root, name, title, files):
+def write_scripts(root, name, title, files, where='It is in the same menu as your ModernCentralStation asset.'):
     ps_title = title.replace("'", "''")
     fallback = did(name, 'folder')[:16]
     names = sorted({os.path.basename(rel) for _, rel in files})
     for fn, body in (('install.bat', INSTALL), ('uninstall.bat', UNINSTALL)):
         text = (body.replace('__NAME__', name).replace('__TITLE__', ps_title).replace('__FALLBACK__', fallback)
+                .replace('__WHERE__', where.replace("'", "''"))
                 .replace('__FILES__', ',\n'.join("    '" + n.replace("'", "''") + "'" for n in names)))
         with open(os.path.join(root, fn), 'w', newline='\r\n', encoding='ascii') as f:
             f.write(text)
     with open(os.path.join(root, 'README.txt'), 'w', newline='\r\n') as f:
         f.write(f'{title}\r\n\r\n1. Close Cities: Skylines II.\r\n2. Double-click install.bat.\r\n'
-                f'3. Start the game. The asset "{title}" is in the same menu as your ModernCentralStation.\r\n\r\n'
+                f'3. Start the game. {where}\r\n\r\n'
                 'uninstall.bat removes exactly the files install.bat added.\r\n')
 
 if __name__ == '__main__':

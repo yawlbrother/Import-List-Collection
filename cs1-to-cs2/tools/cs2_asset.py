@@ -89,7 +89,7 @@ def _num(v):
     if isinstance(v, bool): return 'true' if v else 'false'
     if isinstance(v, int): return str(v)
     if isinstance(v, float):
-        return repr(int(v)) if v.is_integer() else repr(v)
+        return repr(int(v)) if v.is_integer() else repr(v).replace('e', 'E')   # C# writes 1E-06
     return json.dumps(v, ensure_ascii=False)
 
 def dumps(root):
@@ -167,3 +167,99 @@ def static_object_prefab(name, mesh_cid, ui_group_guid, icon_cid, cost=1000):
             Obj('Game.Prefabs.ObjectMeshInfo, Game', dict(m_Mesh=Ref('CID:' + mesh_cid), m_Position=float3(0, 0, 0),
                                                            m_Rotation=quat_identity(), m_RequireState=0))]),
         m_Circular=False))
+
+# ---------------------------------------------------------------- vehicles
+def float2(x, y):
+    return Obj('Unity.Mathematics.float2, Unity.Mathematics', dict(x=x, y=y), ref=False)
+
+def quat(x, y, z, w):
+    return Obj('Unity.Mathematics.quaternion, Unity.Mathematics',
+               dict(value=Obj('Unity.Mathematics.float4, Unity.Mathematics', dict(x=x, y=y, z=z, w=w), ref=False)), ref=False)
+
+def vec3(x, y, z):
+    return Bare('UnityEngine.Vector3, UnityEngine.CoreModule', [float(x), float(y), float(z)])
+
+def bone(name, world_pos, parent=-1, bone_type=0, parent_world=(0, 0, 0)):
+    """A ProceduralAnimationProperties bone at rest. Positions in metres, identity rotation,
+    unit scale; bindPose is the inverse of the bone's world transform (a translation by -pos)."""
+    wx, wy, wz = (float(v) for v in world_pos)
+    px, py, pz = (float(v) for v in parent_world)
+    m = dict(m00=0.0, m10=0.0, m20=0.0, m30=0.0, m01=0.0, m11=0.0, m21=0.0, m31=0.0,
+             m02=0.0, m12=0.0, m22=0.0, m32=0.0, m03=-wx, m13=-wy, m23=-wz, m33=1)
+    m['m00'] = m['m11'] = m['m22'] = 1
+    return Obj('Game.Prefabs.ProceduralAnimationProperties+BoneInfo, Game', dict(
+        name=name, position=vec3(wx - px, wy - py, wz - pz),
+        rotation=Bare('UnityEngine.Quaternion, UnityEngine.CoreModule', [0, 0, 0, 1]),
+        scale=vec3(1, 1, 1),
+        bindPose=Obj('UnityEngine.Matrix4x4, UnityEngine.CoreModule', m, ref=False),
+        parentId=parent, m_Type=bone_type, m_Speed=0, m_Acceleration=0, m_ConnectionID=0, m_SourceID=0))
+
+def procedural_animation(bones):
+    return Obj('Game.Prefabs.ProceduralAnimationProperties, Game', dict(
+        name='ProceduralAnimationProperties', active=True,
+        m_Bones=Arr('Game.Prefabs.ProceduralAnimationProperties+BoneInfo[], Game', bones), m_Animations=None))
+
+def public_transport(capacity, transport_type=1):
+    return Obj('Game.Prefabs.PublicTransport, Game', dict(
+        name='PublicTransport', active=True, m_TransportType=transport_type,
+        m_PassengerCapacity=int(capacity), m_Purposes=1, m_MaintenanceRange=1000))
+
+def vehicle_side_effects():
+    return Obj('Game.Prefabs.VehicleSideEffects, Game', dict(
+        name='VehicleSideEffects', active=True, m_RoadWear=float2(1, 2), m_NoisePollution=float2(0, 10),
+        m_AirPollution=float2(0, 0)))
+
+def ui_object(icon_cid, group_guid=None, priority=0):
+    return Obj('Game.Prefabs.UIObject, Game', dict(
+        name='UIObject', active=True, m_Group=Ref('UnityGUID:' + group_guid) if group_guid else None,
+        m_Priority=priority, m_Icon=f'assetdb://global/{icon_cid}', m_IsDebugObject=False))
+
+def activity_location(activity_guid, positions):
+    """positions: list of (x, y, z); doors face outward (+x or -x)."""
+    locs = []
+    for x, y, z in positions:
+        rot = quat(0, 0.707106769, 0, 0.707106769) if x < 0 else quat(0, -0.707106769, 0, 0.707106769)
+        locs.append(Obj('Game.Prefabs.ActivityLocation+LocationInfo, Game', dict(
+            m_Activity=Ref('UnityGUID:' + activity_guid), m_Position=float3(float(x), float(y), float(z)), m_Rotation=rot)))
+    return Obj('Game.Prefabs.ActivityLocation, Game', dict(
+        name='ActivityLocation', active=True,
+        m_Locations=Arr('Game.Prefabs.ActivityLocation+LocationInfo[], Game', locs),
+        m_InvertWhen=0, m_AnimatedPropName='', m_RequireAuthorization=False))
+
+def effect_source(effects):
+    """effects: list of (effect guid, (x, y, z), (qx, qy, qz, qw))."""
+    items = [Obj('Game.Prefabs.EffectSource+EffectSettings, Game', dict(
+        m_Effect=Ref('UnityGUID:' + guid), m_PositionOffset=float3(*map(float, pos)), m_Rotation=quat(*rot),
+        m_Scale=float3(1, 1, 1), m_Intensity=1, m_ParentMesh=0, m_AnimationIndex=-1)) for guid, pos, rot in effects]
+    return Obj('Game.Prefabs.EffectSource, Game', dict(
+        name='EffectSource', active=True,
+        m_Effects=Arr('System.Collections.Generic.List`1[[Game.Prefabs.EffectSource+EffectSettings, Game]], mscorlib', items),
+        m_AnimationCurves=Arr('System.Collections.Generic.List`1[[Game.Prefabs.EffectSource+AnimationProperties, Game]], mscorlib', [])))
+
+def _mesh_list(mesh_cid):
+    return Arr('Game.Prefabs.ObjectMeshInfo[], Game', [
+        Obj('Game.Prefabs.ObjectMeshInfo, Game', dict(m_Mesh=Ref('CID:' + mesh_cid), m_Position=float3(0, 0, 0),
+                                                       m_Rotation=quat_identity(), m_RequireState=0))])
+
+TRAIN_DEFAULTS = dict(m_Circular=False, m_TrackType=1, m_EnergyType=2, m_MaxSpeed=200, m_Acceleration=5,
+                      m_Braking=10)
+
+def _train_fields(speed):
+    f = dict(TRAIN_DEFAULTS); f['m_MaxSpeed'] = speed
+    f.update(m_Turning=float2(90, 10), m_BogieOffset=float2(0, 0), m_AttachOffset=float2(0, 0))
+    return f
+
+def train_car_prefab(name, mesh_cid, components, speed=200):
+    return Obj('Game.Prefabs.MultipleUnitTrainCarPrefab, Game', dict(
+        name=name, active=True, version=1, m_prefabFormat=0,
+        components=Arr(COMPONENT_LIST, components), m_Meshes=_mesh_list(mesh_cid), **_train_fields(speed)))
+
+def train_front_prefab(name, mesh_cid, components, carriage_cids, speed=200, reversed_end=True):
+    cars = [Obj('Game.Prefabs.MultipleUnitTrainCarriageInfo, Game', dict(
+        m_Carriage=Ref('CID:' + c), m_Direction=d, m_MinCount=1, m_MaxCount=1)) for c, d in carriage_cids]
+    return Obj('Game.Prefabs.MultipleUnitTrainFrontPrefab, Game', dict(
+        name=name, active=True, version=1, m_prefabFormat=0,
+        components=Arr(COMPONENT_LIST, components), m_Meshes=_mesh_list(mesh_cid), **_train_fields(speed),
+        m_MinMultipleUnitCount=1, m_MaxMultipleUnitCount=1,
+        m_Carriages=Arr('Game.Prefabs.MultipleUnitTrainCarriageInfo[], Game', cars),
+        m_AddReversedEndCarriage=reversed_end))

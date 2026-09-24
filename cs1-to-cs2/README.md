@@ -11,6 +11,7 @@ Personal toolkit for moving Cities: Skylines 1 assets into Cities: Skylines II.
 | `tools/cs2_texture.py` | Reads and writes CS2 plain `.Texture` files (BC7 mip chains) |
 | `tools/cs2_asset.py` | Writes `.Prefab`, `.Surface`, `.loc`, `.cid` (byte-identical to the game's importer output) |
 | `tools/build_prop.py` | CS1 `.crp` mesh → installable CS2 prop package with `install.bat` / `uninstall.bat` |
+| `tools/build_train.py` | CS1 train `.crp` → installable CS2 multiple-unit train (bogie/axle bones, doors, headlights, consist) |
 | `tools/preview.py` | Small software renderer for icons and previews |
 | `tools/cok_tool.py` | Reads CS2 `.cok` packages: `tree` (prefab graph), `prefab` (dump one prefab as clean JSON) |
 | `windows/cs2_grab_samples.bat` | Read-only. Zips small reference files (plain .Texture, .Surface, .Geometry, .Prefab from ImportedData and a loose-file mod) to the Desktop, capped at 60 MB |
@@ -51,5 +52,8 @@ Build a prop from a CS1 asset (output goes to `dist/`, which is git-ignored beca
 - `MultipleUnitTrainFrontPrefab`: the lead car. Holds `m_TrackType`, `m_EnergyType`, `m_MaxSpeed`, `m_Acceleration`, `m_Braking`, the ordered `m_Carriages` list (each with `m_Direction`) and `m_AddReversedEndCarriage` (mirrors the lead car onto the back).
 - `MultipleUnitTrainCarPrefab`: every other car. Carries its own `PublicTransport` (capacity), `ActivityLocation` (door positions), `EffectSource` (lights, sounds).
 - `RenderPrefab`: one mesh. Links a Geometry and a Surface, holds `LodProperties` (LOD1/LOD2 render prefabs) and `ProceduralAnimationProperties`, the bones: a root, one `Wheelset` per bogie (type 15) and `Axle` bones (type 4).
+- Bones (`ProceduralAnimationProperties`): list of BoneInfo {name, position (local to parent), rotation, scale, bindPose (inverse of the bone's rest world transform), parentId, m_Type}. Types seen: 0 root, 15 wheelset (swivels on curves), 4 axle (spins). Vertex `blendindices` (one uint32) = index into that list; no blend weights. Only LOD0 carries bones.
+- Front prefab: `m_Carriages` (carriage cid + `m_Direction` 0/1) and `m_AddReversedEndCarriage` (mirrors the front car onto the back). `m_MaxSpeed` is km/h.
+- Doors = `ActivityLocation` entries with activity `55cd3132…`; headlights = `EffectSource` entries with effect `de32f8ad…`; every car also carries effect `76d8c521…` at (0, 4, 0).
 - The KISS pack puts a tiny `kisscaltrain07` "car" (gangway bellows, no seats) between every real car.
 - The pack also carries components from the **Better Transit Selector** code mod (`BTS_TrainPack`, `BTS_TrainVariant`). Strip those when using it as a template.
