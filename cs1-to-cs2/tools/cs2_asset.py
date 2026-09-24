@@ -89,6 +89,7 @@ def _num(v):
     if isinstance(v, bool): return 'true' if v else 'false'
     if isinstance(v, int): return str(v)
     if isinstance(v, float):
+        if abs(v) < 1e-6: v = 0.0
         return repr(int(v)) if v.is_integer() else repr(v).replace('e', 'E')   # C# writes 1E-06
     return json.dumps(v, ensure_ascii=False)
 
@@ -149,8 +150,9 @@ def render_prefab(name, geometry_cid, surface_cids, bounds_min, bounds_max, surf
         m_GeometryAsset=Ref('CID:' + geometry_cid),
         m_SurfaceAssets=Arr(SURFACE_REF_ARRAY, [Ref('CID:' + c) for c in surface_cids]),
         m_Bounds=Obj('Colossal.Mathematics.Bounds3, Colossal.Mathematics',
-                     dict(min=float3(*map(float, bounds_min)), max=float3(*map(float, bounds_max))), ref=False),
-        m_SurfaceArea=float(surface_area), m_IndexCount=int(index_count), m_VertexCount=int(vertex_count),
+                     dict(min=float3(*(round(float(x), 6) for x in bounds_min)),
+                          max=float3(*(round(float(x), 6) for x in bounds_max))), ref=False),
+        m_SurfaceArea=round(float(surface_area), 4), m_IndexCount=int(index_count), m_VertexCount=int(vertex_count),
         m_MeshCount=len(surface_cids), m_IsImpostor=False, m_ManualVTRequired=False))
 
 def static_object_prefab(name, mesh_cid, ui_group_guid, icon_cid, cost=1000):
@@ -182,13 +184,13 @@ def vec3(x, y, z):
 def bone(name, world_pos, parent=-1, bone_type=0, parent_world=(0, 0, 0)):
     """A ProceduralAnimationProperties bone at rest. Positions in metres, identity rotation,
     unit scale; bindPose is the inverse of the bone's world transform (a translation by -pos)."""
-    wx, wy, wz = (float(v) for v in world_pos)
-    px, py, pz = (float(v) for v in parent_world)
+    wx, wy, wz = (round(float(v), 6) for v in world_pos)
+    px, py, pz = (round(float(v), 6) for v in parent_world)
     m = dict(m00=0.0, m10=0.0, m20=0.0, m30=0.0, m01=0.0, m11=0.0, m21=0.0, m31=0.0,
              m02=0.0, m12=0.0, m22=0.0, m32=0.0, m03=-wx, m13=-wy, m23=-wz, m33=1)
     m['m00'] = m['m11'] = m['m22'] = 1
     return Obj('Game.Prefabs.ProceduralAnimationProperties+BoneInfo, Game', dict(
-        name=name, position=vec3(wx - px, wy - py, wz - pz),
+        name=name, position=vec3(round(wx - px, 6), round(wy - py, 6), round(wz - pz, 6)),
         rotation=Bare('UnityEngine.Quaternion, UnityEngine.CoreModule', [0, 0, 0, 1]),
         scale=vec3(1, 1, 1),
         bindPose=Obj('UnityEngine.Matrix4x4, UnityEngine.CoreModule', m, ref=False),
@@ -220,7 +222,7 @@ def activity_location(activity_guid, positions):
     for x, y, z in positions:
         rot = quat(0, 0.707106769, 0, 0.707106769) if x < 0 else quat(0, -0.707106769, 0, 0.707106769)
         locs.append(Obj('Game.Prefabs.ActivityLocation+LocationInfo, Game', dict(
-            m_Activity=Ref('UnityGUID:' + activity_guid), m_Position=float3(float(x), float(y), float(z)), m_Rotation=rot)))
+            m_Activity=Ref('UnityGUID:' + activity_guid), m_Position=float3(*(round(float(v), 6) for v in (x, y, z))), m_Rotation=rot)))
     return Obj('Game.Prefabs.ActivityLocation, Game', dict(
         name='ActivityLocation', active=True,
         m_Locations=Arr('Game.Prefabs.ActivityLocation+LocationInfo[], Game', locs),
@@ -229,7 +231,7 @@ def activity_location(activity_guid, positions):
 def effect_source(effects):
     """effects: list of (effect guid, (x, y, z), (qx, qy, qz, qw))."""
     items = [Obj('Game.Prefabs.EffectSource+EffectSettings, Game', dict(
-        m_Effect=Ref('UnityGUID:' + guid), m_PositionOffset=float3(*map(float, pos)), m_Rotation=quat(*rot),
+        m_Effect=Ref('UnityGUID:' + guid), m_PositionOffset=float3(*(round(float(v), 6) for v in pos)), m_Rotation=quat(*rot),
         m_Scale=float3(1, 1, 1), m_Intensity=1, m_ParentMesh=0, m_AnimationIndex=-1)) for guid, pos, rot in effects]
     return Obj('Game.Prefabs.EffectSource, Game', dict(
         name='EffectSource', active=True,

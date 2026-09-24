@@ -26,7 +26,7 @@ from build_prop import (did, cs1_materials, material_for_mesh, convert_textures,
 ACTIVITY_BOARD = '55cd31323498ccf4ca4831d41291c0f4'
 EFFECT_HEADLIGHT = 'de32f8ad166d2d944b6f069e25675da1'
 EFFECT_TRAIN = '76d8c52143e7618448f2ff10af98015c'
-BODY_CUT_Y = 1.15        # below this (near a bogie) = bogie frame
+BODY_CUT_Y = 1.2         # triangles entirely below this (near a bogie) = bogie frame
 BOGIE_ZONE_Z = 5.0       # bogie parts only exist beyond this distance from the car centre
 WHEEL_TOP_Y = 0.72
 
@@ -78,6 +78,12 @@ def connected_components(V, T):
 def assign_bones(V, T, bogies, wheel_y):
     """Bone index per vertex: 0 body, then per bogie [wheelset, axle, axle] in bogies order."""
     bone = np.zeros(len(V), np.uint32)
+    # a vertex may only join a bogie if every triangle it touches stays below the body skirt;
+    # skirt panels have their bottom edge down at bogie height but reach far up
+    tri_max_y = V[T][:, :, 1].max(1)
+    vmax = np.full(len(V), -9.0)
+    for k in range(3):
+        np.maximum.at(vmax, T[:, k], tri_max_y)
     comp = connected_components(V, T)
     comp_size = np.bincount(comp); comp_ymax = np.full(comp.max() + 1, -9.0)
     np.maximum.at(comp_ymax, comp, V[:, 1])
@@ -86,7 +92,7 @@ def assign_bones(V, T, bogies, wheel_y):
     idx = 1
     for bz, axles in bogies:
         side = np.sign(bz)
-        near = (V[:, 1] < BODY_CUT_Y) & (V[:, 2] * side > BOGIE_ZONE_Z)
+        near = (vmax < BODY_CUT_Y) & (V[:, 2] * side > BOGIE_ZONE_Z)
         bone[near] = idx
         for k, az in enumerate(axles):
             at_axle = near & (np.abs(V[:, 2] - az) < 0.45) & (is_wheel_part | is_shaft)
