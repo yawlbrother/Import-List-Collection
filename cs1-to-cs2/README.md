@@ -7,10 +7,11 @@ Personal toolkit for moving Cities: Skylines 1 assets into Cities: Skylines II.
 | File | What it does |
 |---|---|
 | `tools/crp_tool.py` | Reads CS1 `.crp` packages: `list`, `info` (metadata + vehicle stats), `extract` (meshes → OBJ, textures → PNG) |
+| `tools/cs2_geometry.py` | Reads and writes CS2 `.Geometry` files (meshopt + zstd streams) |
 | `tools/cok_tool.py` | Reads CS2 `.cok` packages: `tree` (prefab graph), `prefab` (dump one prefab as clean JSON) |
 | `windows/cs2_scout.bat` | Read-only. Run on the gaming PC; writes `cs2_scout_report.txt` to the Desktop describing the CS2 folders, installed packages, game version and Blender install |
 
-`pip install pillow` is the only dependency.
+`pip install pillow meshoptimizer zstandard numpy`
 
 ## Format notes
 
@@ -26,7 +27,8 @@ Personal toolkit for moving Cities: Skylines 1 assets into Cities: Skylines II.
 ### CS2 `.cok`
 - A plain (stored) zip. Every file has a sibling `.cid` holding its 32-hex asset id; prefabs reference each other with `$fstrref:"CID:<id>"`.
 - `.Prefab` is almost-JSON (see `cok_tool.loads`). `.loc` is binary localisation.
-- `.Geometry` is binary: a header (vertex count, index count, stream sizes) followed by zstd-compressed, apparently meshopt-encoded, streams.
+- `.Geometry`: **solved, read + write** in `tools/cs2_geometry.py` (full layout in its docstring). 138-byte header, then one zstd frame per stream, each stream meshoptimizer-encoded (index codec v1, vertex codec v0). Typical LOD0 layout: position 3×f32, normal 2×snorm16 octahedral, tangent 32-bit packed octahedral (15+15 bits + bitangent sign), color 4×unorm8, uv0–uv2 2×f16, uv3 2×f32, one uint32 bone index per vertex. Verified by re-encoding all 19 KISS geometries: every attribute is byte-exact after decoding (one zero-area triangle gets its corners reordered by the index codec). `pip install meshoptimizer zstandard numpy`.
+- `VTTexture`: starts `01 00 ff` + the 16-byte texture GUID that the Surface references, then tile layout info, per-tile block-compressed data in zstd frames. Small mips live in the shared `StreamingData~/TS512_*.MidMips`. Not decoded yet.
 - `.Surface` is the material: shader keywords (`_TANGENTSPACE_OCTO`, `_EMISSIVE_PROCEDURAL`) and texture slots `_BaseColorMap`, `_NormalMap`, `_MaskMap`, `_ControlMask`, `_EmissiveColorMap`.
 - Textures ship as virtual-texture data (`StreamingData~/VT/*.VTTexture`, `*.VTSurface`, `TS512_*.MidMips`).
 
