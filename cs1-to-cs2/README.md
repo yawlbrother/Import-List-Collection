@@ -30,6 +30,11 @@ Build a train (front car, then carriages in order; the game mirrors the front ca
     python build_train.py ASSET.crp --name SJX40x12 --title "SJ X40 12-car" --front 33:36 \
         --car 0:6 --car 33:36 --car 0:6 --car 33:36 --car 0:6 --car 33:36 --car 0:6 --car 33:36 --car 0:6 --car 15:18 --out ../dist
 
+A cabless middle car can be synthesised from two cab cars whose flat ends face opposite ways (`--middle A:LOD+B:LOD`, A's flat end at -Z, B's at +Z): each is cut through its logo centre (found by rendering the side) and the flat halves are joined, then `--car mid` places it:
+
+    python build_train.py ASSET.crp --name SJX40_4x3 --title "SJ X40 12-car, 4x3" --front 33:36 --middle 15:18+0:6 \
+        --car mid --car 0:6 --car 33:36 --car mid --car 0:6 --car 33:36 --car mid --car 0:6 --car 15:18 --car mid --out ../dist
+
 ## Format notes
 
 ### CS1 `.crp`

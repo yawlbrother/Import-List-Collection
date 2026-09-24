@@ -112,8 +112,92 @@ def bone_list(prefix, bogies, wheel_y):
                                 parent_world=(0, wheel_y, bz)))
     return bones
 
+# ---------------------------------------------------------------- middle car synthesis
+def clip_half(m, keep_sign, cut=0.0, eps=1e-6):
+    """Keep the part of a CS1 mesh dict with z*keep_sign >= cut, cutting triangles on that plane,
+    then slide the kept part so the cut lands on z = 0."""
+    V = np.asarray(m['V'], np.float64); N = np.asarray(m['N'], np.float64); UV = np.asarray(m['UV'], np.float64)
+    T = np.concatenate([np.asarray(t, np.int64).reshape(-1, 3) for t in m['tris']])
+    d = V[:, 2] * keep_sign - cut; inside = d >= -eps
+    nV, nN, nUV, tris = [], [], [], []
+    remap = {}; cache = {}
+    def keep(i):
+        if i not in remap:
+            remap[i] = len(nV); nV.append(V[i]); nN.append(N[i]); nUV.append(UV[i])
+        return remap[i]
+    def cross(i, j):
+        k = (min(i, j), max(i, j))
+        if k not in cache:
+            t = d[i] / (d[i] - d[j]); n = N[i] + (N[j] - N[i]) * t
+            cache[k] = len(nV); nV.append(V[i] + (V[j] - V[i]) * t); nN.append(n / max(np.linalg.norm(n), 1e-9))
+            nUV.append(UV[i] + (UV[j] - UV[i]) * t)
+        return cache[k]
+    for a, b, c in T:
+        poly = []
+        for i, j in ((a, b), (b, c), (c, a)):
+            if inside[i]: poly.append(keep(i))
+            if inside[i] != inside[j]: poly.append(cross(i, j))
+        for k in range(1, len(poly) - 1):
+            tris.append((poly[0], poly[k], poly[k + 1]))
+    nV = np.asarray(nV); nV[:, 2] -= keep_sign * cut
+    return dict(name=m['name'], V=list(nV), N=nN, UV=nUV, T=[], tris=[tuple(np.asarray(tris).ravel())])
+
+def logo_z(m, texture, side=+1, debug=None):
+    """z of the largest light-coloured feature on the car side at logo height (the operator logo),
+    found by rendering the side head-on against black. Returns None when nothing stands out."""
+    V = np.asarray(m['V'], np.float64); N = np.asarray(m['N'], np.float64); UV = np.asarray(m['UV'], np.float64)
+    T = np.concatenate([np.asarray(t, np.int64).reshape(-1, 3) for t in m['tris']])
+    W, H, dist, fov = 4000, 800, 700.0, 2.2
+    im = preview.render([(V, N, UV, T, texture)], W, H, 90 * side, 0, dist, fov, (0, 2.3, 0), bg=(0, 0, 0), ambient=1.0, gain=1.0)
+    img = np.asarray(im); f = 0.5 * H / np.tan(np.radians(fov) / 2); ppm = f / dist
+    r0, r1 = int(H / 2 - 0.55 * ppm), int(H / 2 + 0.55 * ppm)          # y in [1.75, 2.85]
+    count = (img[r0:r1].mean(2) > 75).sum(0)          # logo is mid-grey on a near-black band
+    cols = np.where(count >= 3)[0]
+    if not len(cols):
+        return None
+    clusters, start = [], cols[0]
+    for a, b_ in zip(cols, cols[1:]):
+        if b_ - a > 12: clusters.append((start, a)); start = b_
+    clusters.append((start, cols[-1]))
+    lo, hi = max(clusters, key=lambda c: count[c[0]:c[1] + 1].sum())
+    if count[lo:hi + 1].sum() < 0.04 * ppm * ppm:                         # smaller than 0.04 m² of pixels: not a logo
+        return None
+    w = count[lo:hi + 1]; centre = (np.arange(lo, hi + 1) * w).sum() / w.sum()
+    z = -side * (centre - W / 2) / ppm                                     # screen x runs along -z when looking from +x
+    if debug:
+        from PIL import ImageDraw
+        d = ImageDraw.Draw(im); d.line([(centre, 0), (centre, H)], fill=(255, 0, 0), width=2)
+        d.rectangle([lo, r0, hi, r1], outline=(0, 255, 0)); im.crop((W // 2 - 14 * ppm, 0, W // 2 + 14 * ppm, H)).save(debug)
+    return float(z)
+
+def merge(a, b):
+    off = len(a['V'])
+    tris = tuple(a['tris'][0]) + tuple(i + off for i in b['tris'][0])
+    return dict(name=a['name'] + '+' + b['name'], V=list(a['V']) + list(b['V']), N=list(a['N']) + list(b['N']),
+                UV=list(a['UV']) + list(b['UV']), T=[], tris=[tris])
+
+def splice_middle(b, E, minus, plus):
+    """A cabless middle car: the z<0 half of mesh `minus` (flat end at -Z) joined to the z>0 half of
+    mesh `plus` (flat end at +Z). Returns (mesh, lod mesh, tyres, doors)."""
+    (mi, mlod), (pi_, plod) = minus, plus
+    A_, B_ = C.read_mesh(b, E[mi]), C.read_mesh(b, E[pi_])
+    # cut through the logo centre on each car (it sits on a window pillar) so the halves join
+    # into one logo and one pillar instead of two of each side by side
+    tex = C.read_texture(b, E[material_for_mesh(E, cs1_materials(b, E), mi)['_MainTex']])[2]
+    za, zb = logo_z(A_, tex), logo_z(B_, tex)
+    ca = -za if za is not None and za < 0 else 0.0
+    cb = zb if zb is not None and zb > 0 else 0.0
+    print(f'middle car: cutting {A_["name"][:20]} at z={-ca:.3f} and {B_["name"][:20]} at z={cb:.3f}')
+    mesh = merge(clip_half(A_, -1, ca), clip_half(B_, +1, cb))
+    lod = merge(clip_half(C.read_mesh(b, E[mlod]), -1, ca), clip_half(C.read_mesh(b, E[plod]), +1, cb))
+    tyres = [(x, y, z + ca, r) for x, y, z, r in vehicle_gen(b, E, mi) if z < -ca] + \
+            [(x, y, z - cb, r) for x, y, z, r in vehicle_gen(b, E, pi_) if z > cb]
+    doors = [(x, y, z + ca) for x, y, z in vehicle_data(b, E, mi)[0] if z < -ca] + \
+            [(x, y, z - cb) for x, y, z in vehicle_data(b, E, pi_)[0] if z > cb]
+    return mesh, lod, tyres, doors
+
 # ---------------------------------------------------------------- build
-def build(crp, name, title, out, front, cars, speed, capacity, ui_group):
+def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=None):
     b, hdr, E = C.parse(crp)
     mats = cs1_materials(b, E)
     root = os.path.join(out, name); shutil.rmtree(root, ignore_errors=True)
@@ -140,13 +224,18 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group):
 
     preview_parts = {}      # mesh index -> (V, N, UV, tris, bones)
     mesh_cache = {}         # (mesh, lod) -> LOD0 render prefab cid
+    synthetic = {}          # car key -> (mesh dict, lod mesh dict, tyres, doors)
+    if middle:
+        synthetic['mid'] = splice_middle(b, E, *middle)
+    def read(idx):
+        return synthetic[idx[0]][idx[1]] if isinstance(idx, tuple) and idx[0] in synthetic else C.read_mesh(b, E[idx])
     def build_mesh(stem, mi, lod_mi, bogies, wheel_y):
         """Writes LOD1 + LOD0 geometry, surfaces and render prefabs; returns LOD0 render prefab cid."""
         if (mi, lod_mi) in mesh_cache:
             return mesh_cache[(mi, lod_mi)]
         lod_cid = None
         for level, idx in (('_LOD1', lod_mi), ('', mi)):
-            m = C.read_mesh(b, E[idx])
+            m = read(idx)
             tris, attrs, lo, hi, area = cs1_mesh_to_cs2(m)
             comps = []
             if level == '':
@@ -154,7 +243,7 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group):
                 bones = assign_bones(V, tris.reshape(-1, 3), bogies, wheel_y)
                 attrs['blendindices'] = (10, bones[:, None])
                 comps.append(A.procedural_animation(bone_list(stem, bogies, wheel_y)))
-                preview_parts[mi] = (V, np.asarray(m['N']), np.asarray(m['UV']), tris.reshape(-1, 3), bones)
+                preview_parts[mi[0] if isinstance(mi, tuple) else mi] = (V, np.asarray(m['N']), np.asarray(m['UV']), tris.reshape(-1, 3), bones)
             s = stem + level
             geo_cid = did(name, s, 'geometry'); emit(fname(s, 'Geometry'), lambda p: G.write(p, tris, attrs), geo_cid)
             surf_cid = did(name, s, 'surface'); emit(fname(s, 'Surface'), lambda p: A.write_surface(p, tex_cids[level]), surf_cid)
@@ -174,19 +263,24 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group):
 
     # one carriage prefab per distinct mesh, referenced at every consist position it occupies
     car_cid = {}
-    for k, (cmi, clod) in enumerate(dict.fromkeys(cars)):
+    for k, car in enumerate(dict.fromkeys(cars)):
         stem = f'{name}_Car{chr(65 + k)}'
-        ctyres = vehicle_gen(b, E, cmi); cbogies, cwheel_y, _ = bogies_from_tyres(ctyres)
-        cdoors, _ = vehicle_data(b, E, cmi)
+        if car in synthetic:
+            cmi, clod = (car, 0), (car, 1)
+            ctyres, cdoors = synthetic[car][2], synthetic[car][3]
+        else:
+            cmi, clod = car
+            ctyres = vehicle_gen(b, E, cmi); cdoors, _ = vehicle_data(b, E, cmi)
+        cbogies, cwheel_y, _ = bogies_from_tyres(ctyres)
         cmesh_cid = build_mesh(stem, cmi, clod, cbogies, cwheel_y)
         comps = [A.public_transport(capacity), A.vehicle_side_effects(),
                  A.activity_location(ACTIVITY_BOARD, [(np.sign(x) * 1.3, 0.7, z) for x, y, z in cdoors]),
                  A.effect_source([(EFFECT_TRAIN, (0, 4, 0), (0, -1, 0, 0))])]
-        cid = did(name, stem, 'car'); car = A.train_car_prefab(stem, cmesh_cid, comps, speed)
-        emit(os.path.join(name, fname(stem, 'Prefab')), lambda p: A.write_prefab(p, car), cid)
+        cid = did(name, stem, 'car'); car_prefab = A.train_car_prefab(stem, cmesh_cid, comps, speed)
+        emit(os.path.join(name, fname(stem, 'Prefab')), lambda p: A.write_prefab(p, car_prefab), cid)
         emit(os.path.join(name, f'{fname(stem, "Prefab")[:-7]}_en-US.loc'),
              lambda p: A.write_loc(p, {f'Assets.NAME[{stem}]': f'{title} car {chr(65 + k)}'}), did(name, stem, 'loc'))
-        car_cid[(cmi, clod)] = cid
+        car_cid[car] = cid
     car_cids = [(car_cid[c], 0) for c in cars]
 
     V = preview_parts[mi][0]; nose_z = float(V[:, 2].max())
@@ -198,7 +292,7 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group):
 
     # icon + preview: whole consist, front car mirrored onto the back like the game does
     parts = []; z0 = 0.0
-    order = [preview_parts[mi]] + [preview_parts[c[0]] for c in cars] + [preview_parts[mi]]
+    order = [preview_parts[mi]] + [preview_parts[c if c in synthetic else c[0]] for c in cars] + [preview_parts[mi]]
     for k, (Vp, Np, UVp, Tp, _) in enumerate(order):
         Vp = Vp.astype(np.float64).copy(); Np = Np.astype(np.float64).copy()
         if k == len(order) - 1: Vp[:, [0, 2]] *= -1; Np[:, [0, 2]] *= -1
@@ -244,10 +338,14 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('crp'); ap.add_argument('--name', required=True); ap.add_argument('--title', required=True)
     ap.add_argument('--front', required=True, help='MESH:LOD entry indices of the lead car')
-    ap.add_argument('--car', action='append', default=[], help='MESH:LOD entry indices, in consist order')
+    ap.add_argument('--car', action='append', default=[], help="MESH:LOD entry indices, in consist order, or 'mid'")
+    ap.add_argument('--middle', help='MESH:LOD+MESH:LOD: cab car with its flat end at -Z, then one with it at +Z; '
+                                     'their flat halves are joined into a cabless middle car usable as --car mid')
     ap.add_argument('--speed', type=int, default=200); ap.add_argument('--capacity', type=int, default=70)
     ap.add_argument('--out', default='dist'); ap.add_argument('--ui-group', default=None)
     a = ap.parse_args()
     pair = lambda s: tuple(int(x) for x in s.split(':'))
-    root, z = build(a.crp, a.name, a.title, a.out, pair(a.front), [pair(c) for c in a.car], a.speed, a.capacity, a.ui_group)
+    middle = tuple(pair(x) for x in a.middle.split('+')) if a.middle else None
+    root, z = build(a.crp, a.name, a.title, a.out, pair(a.front), [c if c == 'mid' else pair(c) for c in a.car],
+                    a.speed, a.capacity, a.ui_group, middle)
     print('built', root); print('zip  ', z, os.path.getsize(z) // 1024, 'KB')
