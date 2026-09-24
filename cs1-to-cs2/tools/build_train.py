@@ -37,11 +37,10 @@ WHITE, WARM, RED, BLACK = (1, 1, 1, 1), (1, 0.9974498, 0.745, 1), (1, 0, 0, 1), 
 # Purposes are still being pinned down empirically; each region gets its own so one night-time
 # look at the train shows which purpose does what.
 LIGHT_GROUPS = {
-    'lamps':      (25,  (255, 255, 255), 3,  WHITE, 1.0, 1.0),
-    'upper_win':  (51,  (255, 255, 255), 23, WARM,  0.3, 0.964706),
-    'lower_win':  (76,  (255, 255, 255), 0,  WARM,  0.3, 0.964706),
-    'side_win':   (102, (255, 40, 40),   6,  RED,   0.5, 1.0),
-    'windscreen': (127, (255, 255, 255), 2,  WHITE, 0.5, 1.0),
+    'lamps':      (25,  (255, 255, 255), 3,  WHITE, 1.0,  1.0),
+    'upper_win':  (51,  (255, 214, 150), 23, WARM,  0.05, 0.964706),
+    'lower_win':  (76,  (255, 214, 150), 0,  WARM,  0.05, 0.964706),
+    'side_win':   (102, (255, 30, 30),   6,  RED,   0.05, 1.0),        # probe: does purpose 6 light the rear car?
 }
 LIGHTS = [(p, c, BLACK, i, l, a) for a, _, p, c, i, l in LIGHT_GROUPS.values()]
 LIGHTS_LOD = LIGHTS
