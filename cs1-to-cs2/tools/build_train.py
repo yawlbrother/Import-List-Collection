@@ -49,11 +49,18 @@ LIGHT_GROUPS = {   # name -> (light index, texture rgb, purpose, colour, intensi
     'lamps_white': (3, (255, 255, 255), 3,  WHITE, 1.0,  1.0,      25),
     'cab':         (4, (200, 215, 255), 23, CAB,   0.02, 1.0,      76),
 }
-# Door indicator lamps live on their own sub-mesh with its own two-entry light list (the KISS pack
-# does the same for its headlights), so the body mesh never needs a light index above 4.
+# Door indicator lamps live on their own sub-mesh with its own two-entry light list AND its own tiny
+# texture set, exactly like the KISS headlight mesh: a 12-texel patch on the 2048 px body atlas never
+# lit in-game (the plate showed as a near-black dot by day too), consistent with the renderer sampling
+# a coarse, streamed mip of the atlas for a mesh that small; a 64 px texture that is all lens has no
+# such mip to fall back to.
 # 69 BoardingLightLeft / 70 BoardingLightRight: lit (colour) while boarding on that side, colorOff otherwise.
 DOOR_LIGHTS = [('door_left', 69), ('door_right', 70)]
 DOOR_RGB, DOOR_PATCH_INDEX = (255, 160, 40), 5
+DOOR_TEX = 64                                  # side of the door lamp's own square textures
+DOOR_TEX_COLORS = {'BaseColor': (60, 60, 64, 255), 'Normal': (255, 128, 128, 128), 'MaskMap': (0, 0, 0, 200),
+                   'ControlMask': (0, 0, 0, 0), 'Emissive': (*DOOR_RGB, 255)}
+DOOR_UV = (0.2, 0.8, 0.8, 0.2)                 # u0, u1, v_top, v_bottom on the lamp's own texture
 LIT_ALPHA = 255
 # Static props get no per-car flags, so their interior lights become DecorativeLight (34: always on,
 # invisible by day thanks to auto exposure) and the lamps and door lights stay off (purpose 0).
@@ -66,10 +73,16 @@ def light_table(scale=1.0, prop=False):
             for _, _, p, c, i, l, layer in sorted(LIGHT_GROUPS.values())]
 
 def door_light_table(canary=False):
-    """Light list of the door-lamp sub-mesh. canary=True makes the left lamps always-on (purpose 1)
-    so a look at the train tells whether the lamp itself renders, independent of the boarding flag."""
-    return [(1 if (canary and n == 'door_left') else p, AMBER, BLACK, 0.3, 1.0, 102 + 25 * k)
+    """Light list of the door-lamp sub-mesh. canary=True makes the left lamps plain night lights
+    (purpose 23, the one the windows use) so a look at the train at night tells whether the lamp
+    itself renders, independent of the boarding flag."""
+    return [(23 if (canary and n == 'door_left') else p, AMBER, BLACK, 0.3, 1.0, 102 + 25 * k)
             for k, (n, p) in enumerate(DOOR_LIGHTS)]
+
+# --door-canary also glues a second row of plates onto the BODY mesh (a little below the sub-mesh ones),
+# sampling the old atlas patch with body light index 5: if those light while the sub-mesh plates do
+# not, the sub-mesh path is what fails; if neither does, it is the atlas patch.
+BODY_PLATE_LIGHT = (23, AMBER, BLACK, 0.1, 1.0, 153)
 
 CALIBRATION = (1.0, 0.4, 0.2, 0.1)   # --calibrate: interior intensity scale of the front car and carriage types A, B, C
 NOSE_FRACTION = 0.75                 # glass on the last quarter of the car's length is cab glass
@@ -264,19 +277,20 @@ def paint_emissive(lay):
     lay['index_map'] = idx
     return Image.fromarray(out, 'RGBA')
 
-def door_lamp_mesh(body, doors, lay):
-    """A small separate mesh: one outward-facing quad above every door (CS1 m_doors positions) whose
-    UVs point at the door lamp patch; vertex colour R = 1 on the car's left (-x), 2 on its right.
-    Triangles are wound the way the body winds its own (cross product vs stored normal), so the quads
-    face outward after the same CS1->CS2 conversion; wound the other way they are backface-culled."""
-    if lay['door_patch'] is None or not doors:
+def door_lamp_mesh(body, doors, uv=DOOR_UV, yc=None):
+    """A small mesh: one outward-facing quad above every door (CS1 m_doors positions) mapped to the
+    UV rectangle `uv` = (u0, u1, v_top, v_bottom); vertex colour R = 1 on the car's left (-x), 2 on
+    its right (`side`). Triangles are wound the way the body winds its own (cross product vs stored
+    normal), so the quads face outward after the same CS1->CS2 conversion; wound the other way they
+    are backface-culled."""
+    if not doors:
         return None
     V = np.asarray(body['V'], np.float64); t3 = tri_array(body); N = np.asarray(body['N'], np.float64)
     a, b_, c = V[t3[:, 0]], V[t3[:, 1]], V[t3[:, 2]]
     body_sign = 1.0 if (np.cross(b_ - a, c - a) * N[t3[:, 0]]).sum(1).mean() >= 0 else -1.0
-    px, py = lay['door_patch']; W, H = lay['W'], lay['H']
-    u0, u1 = (px + 2) / (W - 1), (px + PATCH - 2) / (W - 1); v0, v1 = 1 - (py + 2) / (H - 1), 1 - (py + PATCH - 2) / (H - 1)
-    w, h, yc = DOOR_LAMP; nV, nN, nUV, nT, side_of = [], [], [], [], []
+    u0, u1, v0, v1 = uv
+    w, h, yc = DOOR_LAMP[0], DOOR_LAMP[1], DOOR_LAMP[2] if yc is None else yc
+    nV, nN, nUV, nT, side_of = [], [], [], [], []
     for x, _, z in doors:
         side = 1.0 if x > 0 else -1.0
         near = (np.abs(V[:, 2] - z) < 0.9) & (V[:, 1] > yc - 0.4) & (V[:, 1] < yc + 0.2)
@@ -291,6 +305,16 @@ def door_lamp_mesh(body, doors, lay):
     return dict(name='doors', V=np.array(nV), N=np.array(nN), UV=np.array(nUV), T=[], tris=[np.array(nT, np.int64).ravel()],
                 side=np.array(side_of))
 
+def door_textures():
+    """The door lamp's own texture set: every texel is lens (PIL images, slot -> (image, srgb))."""
+    return {slot: (Image.new('RGBA', (DOOR_TEX, DOOR_TEX), DOOR_TEX_COLORS[slot]), slot in ('BaseColor', 'Emissive'))
+            for slot in DOOR_TEX_COLORS}
+
+def atlas_patch_uv(lay):
+    """UV rectangle of the door lamp patch on the body atlas (the diagnostic body plates sample it)."""
+    px, py = lay['door_patch']; W, H = lay['W'], lay['H']
+    return (px + 2) / (W - 1), (px + PATCH - 2) / (W - 1), 1 - (py + 2) / (H - 1), 1 - (py + PATCH - 2) / (H - 1)
+
 def simplify_mesh(m, ratio=LOD1_RATIO):
     """A coarser copy of `m` for LOD1: meshoptimizer collapses edges onto existing vertices, so every
     per-vertex attribute (UVs, light-index colours) survives; unused vertices are dropped."""
@@ -300,7 +324,7 @@ def simplify_mesh(m, ratio=LOD1_RATIO):
     cnt = mo.simplify(dest, idx, V, target_index_count=target, target_error=0.05)
     new = dest[:cnt]; used, remap = np.unique(new, return_inverse=True)
     out = dict(m); out['tris'] = [remap.astype(np.int64)]
-    for key in ('V', 'N', 'UV', 'T', 'C'):
+    for key in ('V', 'N', 'UV', 'T', 'C', 'plate'):
         if key in m and len(m[key]) == len(V):
             out[key] = np.asarray(m[key])[used]
     return out
@@ -341,7 +365,9 @@ def vertex_light_colors(m, index_map):
         np.add.at(votes, (t3[:, k], tri_idx), 1)
     votes[:, 0] = 0
     idx = np.where(votes.sum(1) > 0, votes.argmax(1), 0).astype(np.uint8)
-    idx[idx == DOOR_PATCH_INDEX] = 0                          # the body never lights the door patch
+    idx[idx == DOOR_PATCH_INDEX] = 0                          # the body never lights the door patch...
+    if 'plate' in m:                                          # ...except the --door-canary body plates
+        idx[np.asarray(m['plate'], bool)] = DOOR_PATCH_INDEX
     out = np.zeros((n, 4), np.uint8); out[:, 0] = idx      # red channel only, exactly like the KISS geometries
     return out
 
@@ -560,6 +586,11 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
             if level == '' and slot == 'BaseColor': base_img = im
             if level == '' and slot == 'Emissive': emissive_img = im
     tex_cids['_LOD1'] = tex_cids['']; layouts['_LOD1'] = layouts['']
+    door_tex_cids = []
+    for slot, (im, srgb) in door_textures().items():
+        cid = did(name, 'doorlamp', slot)
+        emit(fname(f'{name}_DoorLamp_{slot}', 'Texture'), lambda p, im=im, srgb=srgb: T.write(p, im, srgb), cid)
+        door_tex_cids.append((SURFACE_SLOT[slot], cid))
 
     preview_parts = {}      # car key -> (V, N, UV, tris, bones)
     mesh_cache = {}         # car key -> (train LOD0 render prefab cid, prop LOD0 render prefab cid)
@@ -569,17 +600,20 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
         if key in mesh_cache:
             return mesh_cache[key]
         m0 = apply_lamp_layout(meshes[''][key], key, layouts[''])
+        dm = door_lamp_mesh(m0, doors)
+        if door_canary and dm is not None and layouts['']['door_patch'] is not None:
+            n0 = len(m0['V']); m0 = merge(m0, door_lamp_mesh(m0, doors, atlas_patch_uv(layouts['']), yc=DOOR_LAMP[2] - 0.16))
+            m0['plate'] = np.arange(len(m0['V'])) >= n0
         variants = {'_LOD2': meshes['_LOD2'][key], '_LOD1': simplify_mesh(m0), '': m0}
         train_lods, prop_lods = [], []
         doors_cid = None
-        dm = door_lamp_mesh(m0, doors, layouts[''])
         if dm is not None:
             tris, attrs, lo, hi, area = cs1_mesh_to_cs2(dm); n = len(dm['V'])
             col = np.zeros((n, 4), np.uint8); col[:, 0] = np.where(dm['side'] < 0, 1, 2); attrs['color'] = (2, col)
             attrs['uv1'] = attrs['uv2'] = (1, np.zeros((n, 2), np.float16)); attrs['uv3'] = (0, np.zeros((n, 2), np.float32))
             s = stem + '_Doors'
             geo_cid = did(name, s, 'geometry'); emit(fname(s, 'Geometry'), lambda p: G.write(p, tris, attrs), geo_cid)
-            surf_cid = did(name, s, 'surface'); emit(fname(s, 'Surface'), lambda p: A.write_surface(p, tex_cids[''], keywords=SURFACE_KEYWORDS), surf_cid)
+            surf_cid = did(name, s, 'surface'); emit(fname(s, 'Surface'), lambda p: A.write_surface(p, door_tex_cids, keywords=SURFACE_KEYWORDS), surf_cid)
             doors_cid = did(name, s, 'renderprefab')
             rp = A.render_prefab(f'{s} Mesh', geo_cid, [surf_cid], lo, hi, area, len(tris), n, components=[A.emissive_properties(door_light_table(door_canary))])
             emit(os.path.join(name, fname(f'{s} Mesh', 'Prefab')), lambda p: A.write_prefab(p, rp), doors_cid)
@@ -592,7 +626,8 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
             surf_cid = did(name, s, 'surface')
             emit(fname(s, 'Surface'), lambda p: A.write_surface(p, tex_cids[level], keywords=SURFACE_KEYWORDS), surf_cid)
             prop_geo = geo_cid = did(name, s, 'geometry')
-            train_comps = [A.emissive_properties(light_table(scale))]
+            extra = [BODY_PLATE_LIGHT] if door_canary else []
+            train_comps = [A.emissive_properties(light_table(scale) + extra)]
             if level == '':
                 # the prop gets the same mesh without bone indices (a static object has no skeleton)
                 prop_geo = did(name, s, 'geometry-prop'); emit(fname(s + '_Prop', 'Geometry'), lambda p: G.write(p, tris, attrs), prop_geo)
@@ -603,7 +638,7 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
                 preview_parts[key] = (V, np.asarray(m['N']), np.asarray(m['UV']), tris.reshape(-1, 3), bones)
             emit(fname(s, 'Geometry'), lambda p: G.write(p, tris, attrs), geo_cid)
             for kind, geo, comps, lods in (('', geo_cid, train_comps, train_lods),
-                                           ('_Prop', prop_geo, [A.emissive_properties(light_table(prop=True))], prop_lods)):
+                                           ('_Prop', prop_geo, [A.emissive_properties(light_table(prop=True) + [(34,) + BODY_PLATE_LIGHT[1:]] * len(extra))], prop_lods)):
                 rp_cid = did(name, s + kind, 'renderprefab')
                 rp = A.render_prefab(f'{s}{kind} Mesh', geo, [surf_cid], lo, hi, area, len(tris), n,
                                      lod_cids=list(reversed(lods)) if level == '' else [], components=comps)
@@ -721,7 +756,7 @@ if __name__ == '__main__':
     ap.add_argument('--speed', type=int, default=200); ap.add_argument('--capacity', type=int, default=70)
     ap.add_argument('--out', default='dist'); ap.add_argument('--ui-group', default=None)
     ap.add_argument('--calibrate', action='store_true', help='carriage types A/B/C get 0.4/0.2/0.1 of the interior light intensity')
-    ap.add_argument('--door-canary', action='store_true', help='left door lamps always on (diagnostic)')
+    ap.add_argument('--door-canary', action='store_true', help='diagnostic: left door lamps lit all night, plus a second row of plates on the body mesh sampling the atlas patch')
     a = ap.parse_args()
     pair = lambda s: tuple(int(x) for x in s.split(':'))
     middle = tuple(pair(x) for x in a.middle.split('+')) if a.middle else None
