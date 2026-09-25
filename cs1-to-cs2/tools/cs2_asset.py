@@ -35,6 +35,7 @@ def _str7(s):
 
 # ---------------------------------------------------------------- .Surface
 VT_STACKS = (('_BaseColorMap', '_NormalMap', '_MaskMap', '_ControlMask'), ('_EmissiveColorMap',))
+VT_TILE = 512   # the game streams textures in 512 px tiles; a stack smaller than a tile on either side aborts start-up
 
 def write_surface(path, textures, template=1, keywords=('_TANGENTSPACE_OCTO',), vt=None):
     """textures: list of (slot name, texture cid) e.g. ('_BaseColorMap', 'ab12...').
@@ -42,7 +43,11 @@ def write_surface(path, textures, template=1, keywords=('_TANGENTSPACE_OCTO',), 
     stacks every Colossal surface has (KISS, vanilla props): stack 1 = BaseColor, Normal, MaskMap,
     ControlMask; stack 2 = Emissive; 8 slots of 16 bytes each, unused slots zero, then a 16-byte id.
     Without the block the game streams the base colour, normal, mask and emissive maps fine but the
-    control mask never reaches the normal render path, so colour masks only show while highlighted."""
+    control mask never reaches the normal render path, so colour masks only show while highlighted.
+    Textures smaller than VT_TILE on either side cannot go through streaming ("All sizes need to be
+    bigger than the tileSize!" at start-up), so such a surface is written without the block."""
+    if vt and min(vt) < VT_TILE:
+        vt = None
     by_slot = dict(textures)
     b = bytearray(b'\x01\x00' + bytes([template]) + b'\x00\x00\x00')     # version, template, 3 zero bytes
     if vt:                                                                # nullable VT block: 01 = present
