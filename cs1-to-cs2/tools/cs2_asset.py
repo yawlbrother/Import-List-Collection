@@ -13,7 +13,7 @@ Formats (all verified against assets made by the game's own importer):
             object gets "$type" written "N|Full.Type, Assembly" on first use and N afterwards
             (a second counter). Asset references are bare tokens: $fstrref:"CID:<cid>".
 """
-import json, os, secrets, struct
+import hashlib, json, os, secrets, struct
 
 def new_id():
     return secrets.token_hex(16)
@@ -34,10 +34,27 @@ def _str7(s):
     return bytes(out) + b
 
 # ---------------------------------------------------------------- .Surface
-def write_surface(path, textures, template=1, keywords=('_TANGENTSPACE_OCTO',)):
-    """textures: list of (slot name, texture cid) e.g. ('_BaseColorMap', 'ab12...')."""
-    b = bytearray(b'\x01\x00' + bytes([template]))
-    b += b'\x00\x00\x00\x00\xff' * 5
+VT_STACKS = (('_BaseColorMap', '_NormalMap', '_MaskMap', '_ControlMask'), ('_EmissiveColorMap',))
+
+def write_surface(path, textures, template=1, keywords=('_TANGENTSPACE_OCTO',), vt=None):
+    """textures: list of (slot name, texture cid) e.g. ('_BaseColorMap', 'ab12...').
+    vt: (width, height) of the textures, or None. With it the surface carries the two virtual-texture
+    stacks every Colossal surface has (KISS, vanilla props): stack 1 = BaseColor, Normal, MaskMap,
+    ControlMask; stack 2 = Emissive; 8 slots of 16 bytes each, unused slots zero, then a 16-byte id.
+    Without the block the game streams the base colour, normal, mask and emissive maps fine but the
+    control mask never reaches the normal render path, so colour masks only show while highlighted."""
+    by_slot = dict(textures)
+    b = bytearray(b'\x01\x00' + bytes([template]) + b'\x00\x00\x00')     # version, template, 3 zero bytes
+    if vt:                                                                # nullable VT block: 01 = present
+        w, h = vt; b += b'\x01' + struct.pack('<I', len(VT_STACKS))
+        for stack in VT_STACKS:
+            b += struct.pack('<II', w, h)
+            for k in range(8):
+                b += cid_bytes(by_slot[stack[k]]) if k < len(stack) and stack[k] in by_slot else b'\x00' * 16
+        b += b'\xff' + hashlib.md5(('vt/' + os.path.basename(path)).encode()).digest()   # ff = reference tag
+    else:
+        b += b'\x00'
+    b += b'\xff\x00\x00\x00\x00' * 4 + b'\xff'                              # four empty property lists
     b += struct.pack('<I', len(textures))
     for name, cid in sorted(textures):
         b += bytes([len(name)]) + name.encode() + b'\xff' + cid_bytes(cid)

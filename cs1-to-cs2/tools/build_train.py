@@ -648,7 +648,7 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
             meshes[''][key], meshes['_LOD2'][key] = C.read_mesh(b, E[key[0]]), C.read_mesh(b, E[key[1]])
 
     doors_by_key = {k: (synthetic[k][3] if k in synthetic else vehicle_data(b, E, k[0])[0]) for k in keys}
-    tex_cids = {}; layouts = {}
+    tex_cids = {}; layouts = {}; vt_size = {}
     for level, mi in (('', front[0]), ('_LOD2', front[1])):
         tex_cids[level] = []
         mat = material_for_mesh(E, mats, mi); slots = convert_textures(b, E, mat)
@@ -663,6 +663,7 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
         print(f'lights{level or "_LOD0"}: windows {int(lay["regions"]["windows"].sum())} px, cab {int(lay["regions"]["cab"].sum())} px, lamp lens {lay["box"]}, '
               f'red at texel rows {"top" if lay["red_top"] else "bottom" if lay["red_top"] is False else "n/a"}, '
               f'roof-lamp copy at {lay["copy"]}, door lamp patch at {lay["door_patch"]}, roof-lamp triangles ' + str({str(k)[:8]: len(v) for k, v in lay['upper'].items()}))
+        vt_size[level] = slots['BaseColor'][0].size
         for slot, (im, srgb) in slots.items():
             cid = did(name, level, slot)
             emit(fname(f'{name}{level}_{slot}', 'Texture'),
@@ -670,7 +671,7 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
             tex_cids[level].append((SURFACE_SLOT[slot], cid))
             if level == '' and slot == 'BaseColor': base_img = im
             if level == '' and slot == 'Emissive': emissive_img = im
-    tex_cids['_LOD1'] = tex_cids['']; layouts['_LOD1'] = layouts['']
+    tex_cids['_LOD1'] = tex_cids['']; layouts['_LOD1'] = layouts['']; vt_size['_LOD1'] = vt_size['']
 
     preview_parts = {}      # car key -> (V, N, UV, tris, bones)
     mesh_cache = {}         # car key -> (train LOD0 render prefab cid, prop LOD0 render prefab cid)
@@ -692,7 +693,7 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
             attrs['uv1'] = attrs['uv2'] = (1, np.zeros((n, 2), np.float16)); attrs['uv3'] = (0, np.zeros((n, 2), np.float32))
             s = stem + '_Doors'
             geo_cid = did(name, s, 'geometry'); emit(fname(s, 'Geometry'), lambda p: G.write(p, tris, attrs), geo_cid)
-            surf_cid = did(name, s, 'surface'); emit(fname(s, 'Surface'), lambda p: A.write_surface(p, tex_cids[''], keywords=SURFACE_KEYWORDS), surf_cid)
+            surf_cid = did(name, s, 'surface'); emit(fname(s, 'Surface'), lambda p: A.write_surface(p, tex_cids[''], keywords=SURFACE_KEYWORDS, vt=vt_size['']), surf_cid)
             doors_cid = did(name, s, 'renderprefab')
             rp = A.render_prefab(f'{s} Mesh', geo_cid, [surf_cid], lo, hi, area, len(tris), n, components=[A.emissive_properties(door_light_table(door_canary))])
             emit(os.path.join(name, fname(f'{s} Mesh', 'Prefab')), lambda p: A.write_prefab(p, rp), doors_cid)
@@ -703,7 +704,7 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
             attrs['uv1'] = attrs['uv2'] = (1, np.zeros((n, 2), np.float16)); attrs['uv3'] = (0, np.zeros((n, 2), np.float32))
             s = stem + level
             surf_cid = did(name, s, 'surface')
-            emit(fname(s, 'Surface'), lambda p: A.write_surface(p, tex_cids[level], keywords=SURFACE_KEYWORDS), surf_cid)
+            emit(fname(s, 'Surface'), lambda p: A.write_surface(p, tex_cids[level], keywords=SURFACE_KEYWORDS, vt=vt_size[level]), surf_cid)
             prop_geo = geo_cid = did(name, s, 'geometry')
             train_comps = [A.emissive_properties(light_table(scale))]
             line = [A.color_properties([LINE_DEFAULT, WHITE, WHITE])] if level == '' else []
