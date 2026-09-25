@@ -17,6 +17,7 @@ import numpy as np
 from PIL import Image
 
 import crp_tool as C
+import brand as B
 import cs2_asset as A
 import cs2_geometry as G
 import cs2_texture as T
@@ -557,7 +558,7 @@ def splice_middle(b, E, minus, plus):
     return mesh, lod, tyres, doors
 
 # ---------------------------------------------------------------- build
-def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=None, calibrate=False, units=(1, 1), door_canary=False):
+def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=None, calibrate=False, units=(1, 1), door_canary=False, brand=None):
     """cars: list of (car key, min count, max count) in consist order; units: (min, max) whole units the game may couple."""
     b, hdr, E = C.parse(crp)
     mats = cs1_materials(b, E)
@@ -596,6 +597,8 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
         lay = layouts[level] = lamp_layout(aci, meshes[level], front, relocate=(level == ''))
         copy_lamp_texels(slots, lay)
         slots['Emissive'] = (paint_emissive(lay), True)
+        if brand:   # operator identity over the SJ crests, before the line mask so its lit texels stay unmasked
+            B.apply(slots, lay, B.BRANDS[brand])
         line_mask, line_tris = paint_line_mask(slots, meshes[level], doors_by_key, lay)
         print(f'line colour{level or "_LOD0"}: door leaf triangles {line_tris}, {int(line_mask.sum())} texels masked')
         print(f'lights{level or "_LOD0"}: windows {int(lay["regions"]["windows"].sum())} px, cab {int(lay["regions"]["cab"].sum())} px, lamp lens {lay["box"]}, '
@@ -779,6 +782,7 @@ if __name__ == '__main__':
     ap.add_argument('--out', default='dist'); ap.add_argument('--ui-group', default=None)
     ap.add_argument('--calibrate', action='store_true', help='carriage types A/B/C get 0.4/0.2/0.1 of the interior light intensity')
     ap.add_argument('--door-canary', action='store_true', help='left door lamps always on (diagnostic)')
+    ap.add_argument('--brand', choices=sorted(B.BRANDS), help='paint this operator identity over the SJ branding (mark and wordmark glow at night)')
     a = ap.parse_args()
     pair = lambda s: tuple(int(x) for x in s.split(':'))
     middle = tuple(pair(x) for x in a.middle.split('+')) if a.middle else None
@@ -787,5 +791,5 @@ if __name__ == '__main__':
         return (spec if spec == 'mid' else pair(spec), int(lo), int(hi or lo))
     lo, _, hi = a.units.partition('-')
     root, z = build(a.crp, a.name, a.title, a.out, pair(a.front), [car_spec(c) for c in a.car],
-                    a.speed, a.capacity, a.ui_group, middle, a.calibrate, (int(lo), int(hi or lo)), a.door_canary)
+                    a.speed, a.capacity, a.ui_group, middle, a.calibrate, (int(lo), int(hi or lo)), a.door_canary, a.brand)
     print('built', root); print('zip  ', z, os.path.getsize(z) // 1024, 'KB')
