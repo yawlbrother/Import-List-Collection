@@ -14,6 +14,7 @@ Personal toolkit for moving Cities: Skylines 1 assets into Cities: Skylines II.
 | `tools/build_train.py` | CS1 train `.crp` → installable CS2 multiple-unit train (bogie/axle bones, doors, consist, night lights: warm windows on every car, white headlamps, red tail lamps) |
 | `tools/preview.py` | Small software renderer for icons and previews |
 | `tools/cok_tool.py` | Reads CS2 `.cok` packages: `tree` (prefab graph), `prefab` (dump one prefab as clean JSON) |
+| `windows/cs2_import.bat` | The one-click installer: drop it in a folder with the package zips (e.g. `D:\modern central\cs2_import`), double-click, done. Unpacks and installs every zip, replaces earlier versions of the same package cleanly, offers to remove packages whose zip is gone; `cs2_import.bat remove NAME` removes one |
 | `windows/cs2_grab_samples.bat` | Read-only. Zips small reference files (plain .Texture, .Surface, .Geometry, .Prefab from ImportedData and a loose-file mod) to the Desktop, capped at 60 MB |
 | `windows/cs2_scout.bat` | Read-only. Run on the gaming PC; writes `cs2_scout_report.txt` to the Desktop describing the CS2 folders, installed packages, game version and Blender install |
 
