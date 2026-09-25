@@ -73,7 +73,7 @@ def door_light_table(canary=False):
 
 CALIBRATION = (1.0, 0.4, 0.2, 0.1)   # --calibrate: interior intensity scale of the front car and carriage types A, B, C
 NOSE_FRACTION = 0.75                 # glass on the last quarter of the car's length is cab glass
-DOOR_LAMP = (0.12, 0.06, 3.02)       # door indicator lamp: width (along the car), height, centre height
+DOOR_LAMP = (0.16, 0.08, 3.02)       # door indicator lamp: width (along the car), height, centre height
 LOD1_RATIO = 0.4                     # LOD1 keeps this share of LOD0's triangles (KISS: 44 %)
 PATCH = 12                           # atlas texels reserved for the door lamp patch
 
@@ -266,12 +266,14 @@ def paint_emissive(lay):
 
 def door_lamp_mesh(body, doors, lay):
     """A small separate mesh: one outward-facing quad above every door (CS1 m_doors positions) whose
-    UVs point at the door lamp patch; vertex colour R = 1 on the car's left (-x), 2 on its right."""
+    UVs point at the door lamp patch; vertex colour R = 1 on the car's left (-x), 2 on its right.
+    Triangles are wound the way the body winds its own (cross product vs stored normal), so the quads
+    face outward after the same CS1->CS2 conversion; wound the other way they are backface-culled."""
     if lay['door_patch'] is None or not doors:
         return None
     V = np.asarray(body['V'], np.float64); t3 = tri_array(body); N = np.asarray(body['N'], np.float64)
     a, b_, c = V[t3[:, 0]], V[t3[:, 1]], V[t3[:, 2]]
-    flip = (np.cross(b_ - a, c - a) * N[t3[:, 0]]).sum(1).mean() < 0      # winding convention of the source
+    body_sign = 1.0 if (np.cross(b_ - a, c - a) * N[t3[:, 0]]).sum(1).mean() >= 0 else -1.0
     px, py = lay['door_patch']; W, H = lay['W'], lay['H']
     u0, u1 = (px + 2) / (W - 1), (px + PATCH - 2) / (W - 1); v0, v1 = 1 - (py + 2) / (H - 1), 1 - (py + PATCH - 2) / (H - 1)
     w, h, yc = DOOR_LAMP; nV, nN, nUV, nT, side_of = [], [], [], [], []
@@ -281,9 +283,11 @@ def door_lamp_mesh(body, doors, lay):
         bx = float(np.abs(V[near, 0]).max()) if near.any() else abs(x)
         base = len(nV)
         for dz, dy, u, v in ((-w / 2, -h / 2, u0, v1), (w / 2, -h / 2, u1, v1), (w / 2, h / 2, u1, v0), (-w / 2, h / 2, u0, v0)):
-            nV.append((side * (bx + 0.012), yc + dy, z + dz * side)); nN.append((side, 0.0, 0.0)); nUV.append((u, v)); side_of.append(side)
-        q = [(base, base + 1, base + 2), (base, base + 2, base + 3)]
-        nT += [(i, k, j) if flip else (i, j, k) for i, j, k in q]
+            nV.append((side * (bx + 0.012), yc + dy, z + dz)); nN.append((side, 0.0, 0.0)); nUV.append((u, v)); side_of.append(side)
+        for i, j, k in ((base, base + 1, base + 2), (base, base + 2, base + 3)):
+            p0, p1, p2 = (np.array(nV[t]) for t in (i, j, k))
+            outward = np.dot(np.cross(p1 - p0, p2 - p0), nN[i]) * body_sign
+            nT.append((i, j, k) if outward > 0 else (i, k, j))
     return dict(name='doors', V=np.array(nV), N=np.array(nN), UV=np.array(nUV), T=[], tris=[np.array(nT, np.int64).ravel()],
                 side=np.array(side_of))
 
