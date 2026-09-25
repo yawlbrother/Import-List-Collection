@@ -256,13 +256,15 @@ def train_car_prefab(name, mesh_cid, components, speed=200):
         name=name, active=True, version=1, m_prefabFormat=0,
         components=Arr(COMPONENT_LIST, components), m_Meshes=_mesh_list(mesh_cid), **_train_fields(speed)))
 
-def train_front_prefab(name, mesh_cid, components, carriage_cids, speed=200, reversed_end=True):
+def train_front_prefab(name, mesh_cid, components, carriages, speed=200, reversed_end=True, units=(1, 1)):
+    """carriages: list of (cid, direction, min count, max count); the game picks a count in each range
+    (VehicleCarriageElement.m_Count is an int2) and couples `units` (min, max) whole units nose to tail."""
     cars = [Obj('Game.Prefabs.MultipleUnitTrainCarriageInfo, Game', dict(
-        m_Carriage=Ref('CID:' + c), m_Direction=d, m_MinCount=1, m_MaxCount=1)) for c, d in carriage_cids]
+        m_Carriage=Ref('CID:' + c), m_Direction=d, m_MinCount=lo, m_MaxCount=hi)) for c, d, lo, hi in carriages]
     return Obj('Game.Prefabs.MultipleUnitTrainFrontPrefab, Game', dict(
         name=name, active=True, version=1, m_prefabFormat=0,
         components=Arr(COMPONENT_LIST, components), m_Meshes=_mesh_list(mesh_cid), **_train_fields(speed),
-        m_MinMultipleUnitCount=1, m_MaxMultipleUnitCount=1,
+        m_MinMultipleUnitCount=units[0], m_MaxMultipleUnitCount=units[1],
         m_Carriages=Arr('Game.Prefabs.MultipleUnitTrainCarriageInfo[], Game', cars),
         m_AddReversedEndCarriage=reversed_end))
 

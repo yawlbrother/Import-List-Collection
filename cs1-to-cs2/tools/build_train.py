@@ -22,7 +22,7 @@ import cs2_geometry as G
 import cs2_texture as T
 import preview
 from build_prop import (did, cs1_materials, material_for_mesh, convert_textures, cs1_mesh_to_cs2,
-                        SURFACE_SLOT, write_scripts)
+                        SURFACE_SLOT, write_scripts, DEFAULT_UI_GROUP as PROP_UI_GROUP)
 
 # Vanilla GUIDs copied from a working custom train (Stadler KISS Caltrain pack)
 ACTIVITY_BOARD = '55cd31323498ccf4ca4831d41291c0f4'
@@ -32,7 +32,7 @@ BOGIE_TOP_Y = 1.0        # bogie frame and axle boxes stay below this
 BOGIE_MARGIN = 0.35      # bogie box reaches this far beyond the outer wheel rims
 WHEEL_TOP_Y = 0.72
 SURFACE_KEYWORDS = ('_EMISSIVE_PROCEDURAL', '_TANGENTSPACE_OCTO')
-WHITE, WARM, RED, BLACK, CAB = (1, 1, 1, 1), (1, 0.9974498, 0.745, 1), (1, 0, 0, 1), (0, 0, 0, 1), (0.8, 0.88, 1, 1)
+WHITE, WARM, RED, BLACK, CAB, AMBER = (1, 1, 1, 1), (1, 0.9974498, 0.745, 1), (1, 0, 0, 1), (0, 0, 0, 1), (0.8, 0.88, 1, 1), (1, 0.6, 0.15, 1)
 # ---------------------------------------------------------------- lights
 # Lights. The emissive texture's RGB is the light colour and its alpha marks lit texels (255).
 # WHICH light a texel belongs to is not in the texture: it is the per-vertex colour attribute of
@@ -48,16 +48,25 @@ LIGHT_GROUPS = {   # name -> (light index, texture rgb, purpose, colour, intensi
     'lamps_red':   (2, (255, 40, 40),   6,  RED,   1.0,  1.0,      51),
     'lamps_white': (3, (255, 255, 255), 3,  WHITE, 1.0,  1.0,      25),
     'cab':         (4, (200, 215, 255), 23, CAB,   0.02, 1.0,      76),
+    'door_left':   (5, (255, 160, 40),  69, AMBER, 0.3,  1.0,      102),   # BoardingLightLeft: lit while boarding on that side
+    'door_right':  (6, (255, 160, 40),  70, AMBER, 0.3,  1.0,      127),   # BoardingLightRight
 }
 LIT_ALPHA = 255
+# Static props get no per-car flags, so their interior lights become DecorativeLight (34: always on,
+# invisible by day thanks to auto exposure) and the lamps and door lights stay off (purpose 0).
+PROP_PURPOSES = {23: 34, 3: 0, 6: 0, 69: 0, 70: 0}
 
-def light_table(scale=1.0):
+def light_table(scale=1.0, prop=False):
     """EmissiveProperties multi-light list, in light-index order. scale multiplies the interior
     (window and cab) intensities; --calibrate builds a few cars at different scales."""
-    return [(p, c, BLACK, i * (scale if p == 23 else 1.0), l, layer) for _, _, p, c, i, l, layer in sorted(LIGHT_GROUPS.values())]
+    return [(PROP_PURPOSES.get(p, p) if prop else p, c, BLACK, i * (scale if p == 23 else 1.0), l, layer)
+            for _, _, p, c, i, l, layer in sorted(LIGHT_GROUPS.values())]
 
 CALIBRATION = (1.0, 0.4, 0.2, 0.1)   # --calibrate: interior intensity scale of the front car and carriage types A, B, C
 NOSE_FRACTION = 0.75                 # glass on the last quarter of the car's length is cab glass
+DOOR_LAMP = (0.12, 0.06, 3.02)       # door indicator lamp: width (along the car), height, centre height
+LOD1_RATIO = 0.4                     # LOD1 keeps this share of LOD0's triangles (KISS: 44 %)
+PATCH = 12                           # atlas texels reserved for the door lamp patch
 
 RED_FRACTION = 0.4       # bottom part of a combined head/tail lamp lens that glows red
 UPPER_LAMP_GAP = 0.8     # lamps this much above the lowest lamp are roof lamps: white only
@@ -189,11 +198,15 @@ def lamp_layout(aci, meshes, ref_key, relocate=True):
         tri = lamp_triangles(m, box, W, H)
         lower[key], lay['upper'][key] = lamp_groups(m, tri) if relocate else (tri, tri[:0])
     lay['red_top'] = red_rows_from_top(meshes[ref_key], lower[ref_key], W, H)
+    cov = uv_coverage(meshes.values(), W, H)
     if any(len(t) for t in lay['upper'].values()):
         x0, y0, x1, y1 = box
-        lay['copy'] = find_free_rect(uv_coverage(meshes.values(), W, H), x1 - x0 + 4, y1 - y0 + 4)
+        lay['copy'] = find_free_rect(cov, x1 - x0 + 4, y1 - y0 + 4)
         if lay['copy'] is None:
             lay['upper'] = {k: np.zeros(0, np.int64) for k in meshes}
+        else:
+            cx, cy = lay['copy']; cov[cy - 8:cy + y1 - y0 + 12, cx - 8:cx + x1 - x0 + 12] = True
+    lay['door_patch'] = find_free_rect(cov, PATCH, PATCH) if relocate else None
     return lay
 
 def apply_lamp_layout(m, key, lay):
@@ -203,14 +216,19 @@ def apply_lamp_layout(m, key, lay):
     x0, y0, _, _ = lay['box']; cx, cy = lay['copy']
     return relocate_triangles(m, lay['upper'][key], (cx + 2 - x0) / (lay['W'] - 1), -(cy + 2 - y0) / (lay['H'] - 1))
 
+PATCH_COLORS = {'BaseColor': (55, 55, 60, 255), 'Normal': (255, 128, 128, 128), 'MaskMap': (0, 0, 0, 200), 'ControlMask': (0, 0, 0, 0)}
+
 def copy_lamp_texels(slots, lay):
-    """Duplicates the lens texels (plus a 2 px rim) into the free spot in every non-emissive slot."""
-    if lay['copy'] is None:
-        return
-    x0, y0, x1, y1 = lay['box']; cx, cy = lay['copy']
+    """Duplicates the lens texels (plus a 2 px rim) into the free spot in every non-emissive slot, and
+    paints the door lamp patch (dark housing, flat normal, glossy)."""
     for slot, (im, srgb) in slots.items():
-        if slot != 'Emissive':
+        if slot == 'Emissive':
+            continue
+        if lay['copy'] is not None:
+            x0, y0, x1, y1 = lay['box']; cx, cy = lay['copy']
             im.paste(im.crop((x0 - 2, y0 - 2, x1 + 2, y1 + 2)), (cx, cy))
+        if lay['door_patch'] is not None:
+            px, py = lay['door_patch']; im.paste(PATCH_COLORS[slot], (px, py, px + PATCH, py + PATCH))
 
 def paint_emissive(lay):
     """Emissive texture (RGB = light colour, A = 255 on lit texels, 0 elsewhere) and the light index
@@ -231,8 +249,55 @@ def paint_emissive(lay):
             cx, cy = lay['copy']; patch = np.zeros((H, W), bool)
             patch[cy + 2:cy + 2 + (y1 - y0), cx + 2:cx + 2 + (x1 - x0)] = lamps[y0:y1, x0:x1]
             paint(patch, 'lamps_white')
+    if lay['door_patch'] is not None:
+        px, py = lay['door_patch']; patch = np.zeros((H, W), bool); patch[py:py + PATCH, px:px + PATCH] = True
+        paint(patch, 'door_left')                      # right-side doors are re-indexed from the vertex position
     lay['index_map'] = idx
     return Image.fromarray(out, 'RGBA')
+
+def add_door_lamps(m, doors, lay):
+    """Appends a small outward-facing quad above every door (CS1 m_doors positions) whose UVs point at
+    the door lamp patch. Its vertices get the boarding-light index for their side of the car."""
+    if lay['door_patch'] is None or not doors:
+        return m
+    m = dict(m); V = np.asarray(m['V'], np.float64); N = np.asarray(m['N'], np.float64); UV = np.asarray(m['UV'], np.float64)
+    t3 = tri_array(m); n = len(V)
+    # winding convention of the source mesh: sign of (b-a)x(c-a).n over its triangles
+    a, b_, c = V[t3[:, 0]], V[t3[:, 1]], V[t3[:, 2]]
+    flip = (np.cross(b_ - a, c - a) * N[t3[:, 0]]).sum(1).mean() < 0
+    px, py = lay['door_patch']; W, H = lay['W'], lay['H']
+    u0, u1 = (px + 2) / (W - 1), (px + PATCH - 2) / (W - 1); v0, v1 = 1 - (py + 2) / (H - 1), 1 - (py + PATCH - 2) / (H - 1)
+    w, h, yc = DOOR_LAMP; newV, newN, newUV, newT = [], [], [], []
+    for x, _, z in doors:
+        side = 1.0 if x > 0 else -1.0
+        near = (np.abs(V[:, 2] - z) < 0.9) & (V[:, 1] > yc - 0.4) & (V[:, 1] < yc + 0.2)
+        bx = float(np.abs(V[near, 0]).max()) if near.any() else abs(x)
+        base = n + len(newV)
+        for dz, dy, u, v in ((-w / 2, -h / 2, u0, v1), (w / 2, -h / 2, u1, v1), (w / 2, h / 2, u1, v0), (-w / 2, h / 2, u0, v0)):
+            newV.append((side * (bx + 0.012), yc + dy, z + dz * side)); newN.append((side, 0.0, 0.0)); newUV.append((u, v))
+        q = [(base, base + 1, base + 2), (base, base + 2, base + 3)]
+        newT += [(i, k, j) if flip else (i, j, k) for i, j, k in q]
+    m['V'] = np.concatenate([V, np.array(newV)]); m['N'] = np.concatenate([N, np.array(newN)]); m['UV'] = np.concatenate([UV, np.array(newUV)])
+    if 'T' in m and len(m['T']) == n:
+        m['T'] = np.concatenate([np.asarray(m['T'], np.float64), np.tile([0.0, 0.0, 1.0, 1.0], (len(newV), 1))])
+    if 'C' in m and len(m['C']) == n:
+        m['C'] = np.concatenate([np.asarray(m['C'], np.float64), np.zeros((len(newV), np.asarray(m['C']).shape[1]))])
+    m['tris'] = [np.concatenate([t3.ravel(), np.array(newT, np.int64).ravel()])]
+    return m
+
+def simplify_mesh(m, ratio=LOD1_RATIO):
+    """A coarser copy of `m` for LOD1: meshoptimizer collapses edges onto existing vertices, so every
+    per-vertex attribute (UVs, light-index colours) survives; unused vertices are dropped."""
+    import meshoptimizer as mo
+    V = np.ascontiguousarray(np.asarray(m['V'], np.float32)); idx = np.ascontiguousarray(tri_array(m).ravel().astype(np.uint32))
+    target = max(3, int(len(idx) * ratio) // 3 * 3); dest = np.zeros(len(idx), np.uint32)
+    cnt = mo.simplify(dest, idx, V, target_index_count=target, target_error=0.05)
+    new = dest[:cnt]; used, remap = np.unique(new, return_inverse=True)
+    out = dict(m); out['tris'] = [remap.astype(np.int64)]
+    for key in ('V', 'N', 'UV', 'T', 'C'):
+        if key in m and len(m[key]) == len(V):
+            out[key] = np.asarray(m[key])[used]
+    return out
 
 def triangle_light_index(m, index_map):
     """Per-triangle light index: the most common non-zero index among the texels the triangle covers
@@ -270,6 +335,8 @@ def vertex_light_colors(m, index_map):
         np.add.at(votes, (t3[:, k], tri_idx), 1)
     votes[:, 0] = 0
     idx = np.where(votes.sum(1) > 0, votes.argmax(1), 0).astype(np.uint8)
+    left, right = LIGHT_GROUPS['door_left'][0], LIGHT_GROUPS['door_right'][0]
+    idx[(idx == left) & (np.asarray(m['V'])[:, 0] > 0)] = right
     out = np.zeros((n, 4), np.uint8); out[:, 0] = idx      # red channel only, exactly like the KISS geometries
     return out
 
@@ -439,7 +506,8 @@ def splice_middle(b, E, minus, plus):
     return mesh, lod, tyres, doors
 
 # ---------------------------------------------------------------- build
-def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=None, calibrate=False):
+def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=None, calibrate=False, units=(1, 1)):
+    """cars: list of (car key, min count, max count) in consist order; units: (min, max) whole units the game may couple."""
     b, hdr, E = C.parse(crp)
     mats = cs1_materials(b, E)
     root = os.path.join(out, name); shutil.rmtree(root, ignore_errors=True)
@@ -454,20 +522,22 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
         tag = 'asset' if base == asset_dir else 'TextureAssets'
         files.extend([(tag, rel), (tag, rel + '.cid')])
 
-    # every mesh of the consist, per atlas level ('' = LOD0, '_LOD1'); all cars share one CS1 texture set
+    # every mesh of the consist, per atlas: '' = LOD0 (and the simplified LOD1), '_LOD2' = the CS1 LOD
+    # mesh with its own small textures; all cars share one CS1 texture set
     synthetic = {}          # car key -> (mesh dict, lod mesh dict, tyres, doors)
     if middle:
         synthetic['mid'] = splice_middle(b, E, *middle)
-    keys = list(dict.fromkeys([front] + list(cars)))
-    meshes = {'': {}, '_LOD1': {}}
+    car_keys = list(dict.fromkeys(spec for spec, _, _ in cars))
+    keys = list(dict.fromkeys([front] + car_keys))
+    meshes = {'': {}, '_LOD2': {}}
     for key in keys:
         if key in synthetic:
-            meshes[''][key], meshes['_LOD1'][key] = synthetic[key][0], synthetic[key][1]
+            meshes[''][key], meshes['_LOD2'][key] = synthetic[key][0], synthetic[key][1]
         else:
-            meshes[''][key], meshes['_LOD1'][key] = C.read_mesh(b, E[key[0]]), C.read_mesh(b, E[key[1]])
+            meshes[''][key], meshes['_LOD2'][key] = C.read_mesh(b, E[key[0]]), C.read_mesh(b, E[key[1]])
 
     tex_cids = {}; layouts = {}
-    for level, mi in (('', front[0]), ('_LOD1', front[1])):
+    for level, mi in (('', front[0]), ('_LOD2', front[1])):
         tex_cids[level] = []
         mat = material_for_mesh(E, mats, mi); slots = convert_textures(b, E, mat)
         aci = C.read_texture(b, E[mat['_ACIMap']])[2].resize(slots['BaseColor'][0].size)
@@ -476,7 +546,7 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
         slots['Emissive'] = (paint_emissive(lay), True)
         print(f'lights{level or "_LOD0"}: windows {int(lay["regions"]["windows"].sum())} px, cab {int(lay["regions"]["cab"].sum())} px, lamp lens {lay["box"]}, '
               f'red at texel rows {"top" if lay["red_top"] else "bottom" if lay["red_top"] is False else "n/a"}, '
-              f'roof-lamp copy at {lay["copy"]}, roof-lamp triangles ' + str({str(k)[:8]: len(v) for k, v in lay['upper'].items()}))
+              f'roof-lamp copy at {lay["copy"]}, door lamp patch at {lay["door_patch"]}, roof-lamp triangles ' + str({str(k)[:8]: len(v) for k, v in lay['upper'].items()}))
         for slot, (im, srgb) in slots.items():
             cid = did(name, level, slot)
             emit(fname(f'{name}{level}_{slot}', 'Texture'),
@@ -484,55 +554,65 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
             tex_cids[level].append((SURFACE_SLOT[slot], cid))
             if level == '' and slot == 'BaseColor': base_img = im
             if level == '' and slot == 'Emissive': emissive_img = im
+    tex_cids['_LOD1'] = tex_cids['']; layouts['_LOD1'] = layouts['']
 
     preview_parts = {}      # car key -> (V, N, UV, tris, bones)
-    mesh_cache = {}         # car key -> LOD0 render prefab cid
-    def build_mesh(stem, key, bogies, wheel_y, scale=1.0):
-        """Writes LOD1 + LOD0 geometry, surfaces and render prefabs; returns LOD0 render prefab cid."""
+    mesh_cache = {}         # car key -> (train LOD0 render prefab cid, prop LOD0 render prefab cid)
+    def build_mesh(stem, key, bogies, wheel_y, doors, scale=1.0):
+        """Writes the LOD2 (CS1 LOD), LOD1 (simplified) and LOD0 geometry, surfaces and render prefabs,
+        for the train and for the static prop; returns (train, prop) LOD0 render prefab cids."""
         if key in mesh_cache:
             return mesh_cache[key]
-        lod_cid = None
-        for level in ('_LOD1', ''):
-            m = apply_lamp_layout(meshes[level][key], key, layouts[level])
-            tris, attrs, lo, hi, area = cs1_mesh_to_cs2(m)
-            n = len(m['V'])
+        m0 = add_door_lamps(apply_lamp_layout(meshes[''][key], key, layouts['']), doors, layouts[''])
+        variants = {'_LOD2': meshes['_LOD2'][key], '_LOD1': simplify_mesh(m0), '': m0}
+        train_lods, prop_lods = [], []
+        for level in ('_LOD2', '_LOD1', ''):
+            m = variants[level]
+            tris, attrs, lo, hi, area = cs1_mesh_to_cs2(m); n = len(m['V'])
             attrs['color'] = (2, vertex_light_colors(m, layouts[level]['index_map']))
             attrs['uv1'] = attrs['uv2'] = (1, np.zeros((n, 2), np.float16)); attrs['uv3'] = (0, np.zeros((n, 2), np.float32))
-            comps = [A.emissive_properties(light_table(scale))]
+            s = stem + level
+            surf_cid = did(name, s, 'surface')
+            emit(fname(s, 'Surface'), lambda p: A.write_surface(p, tex_cids[level], keywords=SURFACE_KEYWORDS), surf_cid)
+            prop_geo = geo_cid = did(name, s, 'geometry')
+            train_comps = [A.emissive_properties(light_table(scale))]
             if level == '':
+                # the prop gets the same mesh without bone indices (a static object has no skeleton)
+                prop_geo = did(name, s, 'geometry-prop'); emit(fname(s + '_Prop', 'Geometry'), lambda p: G.write(p, tris, attrs), prop_geo)
                 V = np.asarray(m['V'], np.float32)
                 bones = assign_bones(V, tris.reshape(-1, 3), bogies, wheel_y)
                 attrs['blendindices'] = (10, bones[:, None])
-                comps.append(A.procedural_animation(bone_list(stem, bogies, wheel_y)))
+                train_comps.append(A.procedural_animation(bone_list(stem, bogies, wheel_y)))
                 preview_parts[key] = (V, np.asarray(m['N']), np.asarray(m['UV']), tris.reshape(-1, 3), bones)
-            s = stem + level
-            geo_cid = did(name, s, 'geometry'); emit(fname(s, 'Geometry'), lambda p: G.write(p, tris, attrs), geo_cid)
-            surf_cid = did(name, s, 'surface')
-            emit(fname(s, 'Surface'), lambda p: A.write_surface(p, tex_cids[level], keywords=SURFACE_KEYWORDS), surf_cid)
-            rp_cid = did(name, s, 'renderprefab')
-            rp = A.render_prefab(f'{s} Mesh', geo_cid, [surf_cid], lo, hi, area, len(tris), len(m['V']),
-                                 lod_cids=[lod_cid] if lod_cid else [], components=comps)
-            emit(os.path.join(name, fname(f'{s} Mesh', 'Prefab')), lambda p: A.write_prefab(p, rp), rp_cid)
-            lod_cid = rp_cid
-        mesh_cache[key] = lod_cid
-        return lod_cid
+            emit(fname(s, 'Geometry'), lambda p: G.write(p, tris, attrs), geo_cid)
+            for kind, geo, comps, lods in (('', geo_cid, train_comps, train_lods),
+                                           ('_Prop', prop_geo, [A.emissive_properties(light_table(prop=True))], prop_lods)):
+                rp_cid = did(name, s + kind, 'renderprefab')
+                rp = A.render_prefab(f'{s}{kind} Mesh', geo, [surf_cid], lo, hi, area, len(tris), n,
+                                     lod_cids=list(reversed(lods)) if level == '' else [], components=comps)
+                emit(os.path.join(name, fname(f'{s}{kind} Mesh', 'Prefab')), lambda p: A.write_prefab(p, rp), rp_cid)
+                lods.append(rp_cid)
+            print(f'  {s}: {len(tris) // 3} tris, {n} verts')
+        mesh_cache[key] = (train_lods[-1], prop_lods[-1])
+        return mesh_cache[key]
 
     # front car mesh first so a carriage that reuses it shares the render prefab
     mi = front[0]
     tyres = vehicle_gen(b, E, mi); bogies, wheel_y, _ = bogies_from_tyres(tyres)
     doors, lights = vehicle_data(b, E, mi)
-    mesh_cid = build_mesh(name, front, bogies, wheel_y)
+    mesh_cid, front_prop_cid = build_mesh(name, front, bogies, wheel_y, doors)
+    prop_cids = {front: (front_prop_cid, f'{title} cab car')}
 
     # one carriage prefab per distinct mesh, referenced at every consist position it occupies
     car_cid = {}
-    for k, car in enumerate(dict.fromkeys(cars)):
+    for k, car in enumerate(car_keys):
         stem = f'{name}_Car{chr(65 + k)}'
         if car in synthetic:
             ctyres, cdoors = synthetic[car][2], synthetic[car][3]
         else:
             ctyres = vehicle_gen(b, E, car[0]); cdoors, _ = vehicle_data(b, E, car[0])
         cbogies, cwheel_y, _ = bogies_from_tyres(ctyres)
-        cmesh_cid = build_mesh(stem, car, cbogies, cwheel_y, CALIBRATION[min(k + 1, 3)] if calibrate else 1.0)
+        cmesh_cid, cprop_cid = build_mesh(stem, car, cbogies, cwheel_y, cdoors, CALIBRATION[min(k + 1, 3)] if calibrate else 1.0)
         comps = [A.public_transport(capacity), A.vehicle_side_effects(),
                  A.activity_location(ACTIVITY_BOARD, [(np.sign(x) * 1.3, 0.7, z) for x, y, z in cdoors]),
                  A.effect_source([(EFFECT_TRAIN, (0, 4, 0), (0, -1, 0, 0))])]
@@ -541,7 +621,8 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
         emit(os.path.join(name, f'{fname(stem, "Prefab")[:-7]}_en-US.loc'),
              lambda p: A.write_loc(p, {f'Assets.NAME[{stem}]': f'{title} car {chr(65 + k)}'}), did(name, stem, 'loc'))
         car_cid[car] = cid
-    car_cids = [(car_cid[c], 0) for c in cars]
+        prop_cids.setdefault(car, (cprop_cid, f'{title} {"middle" if car == "mid" else "car " + chr(65 + k)} car'))
+    carriages = [(car_cid[spec], 0, lo, hi) for spec, lo, hi in cars]
 
     V = preview_parts[front][0]; nose_z = float(V[:, 2].max())
     def nose_surface(x, y):
@@ -550,17 +631,19 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
     fx = [(EFFECT_HEADLIGHT, (x, y, nose_surface(x, y)), (0, 0, 0, 1)) for x, y, z in lights]
     fx.append((EFFECT_TRAIN, (0, 4, 0), (0, 0, 0, -1)))
 
-    # icon + preview: whole consist, front car mirrored onto the back like the game does
+    # icon + preview: the longest unit, front car mirrored onto the back like the game does
     parts = []; z0 = 0.0
-    order = [preview_parts[front]] + [preview_parts[c] for c in cars] + [preview_parts[front]]
+    order = [preview_parts[front]] + [preview_parts[spec] for spec, lo, hi in cars for _ in range(hi)] + [preview_parts[front]]
     for k, (Vp, Np, UVp, Tp, _) in enumerate(order):
         Vp = Vp.astype(np.float64).copy(); Np = Np.astype(np.float64).copy()
         if k == len(order) - 1: Vp[:, [0, 2]] *= -1; Np[:, [0, 2]] *= -1
         Vp[:, 2] += z0 - Vp[:, 2].max(); z0 = Vp[:, 2].min() - 0.3; parts.append((Vp, Np, UVp, Tp, base_img))
     allV = np.concatenate([p[0] for p in parts]); ctr = (allV.min(0) + allV.max(0)) / 2; size = float(np.ptp(allV, 0).max())
-    icon = preview.crop_to_content(preview.render([parts[0]], 900, 900, 40, -14, 48, 30, (parts[0][0].min(0) + parts[0][0].max(0)) / 2), square=True)
-    icon_cid = did(name, 'icon')
-    emit(fname(name, 'jpg'), lambda p: icon.resize((256, 256), Image.LANCZOS).save(p, 'JPEG', quality=90), icon_cid, base=icon_dir)
+    def car_icon(part, cid):
+        Vp = part[0]; im = preview.crop_to_content(preview.render([part], 900, 900, 40, -14, 48, 30, (Vp.min(0) + Vp.max(0)) / 2), square=True)
+        emit(fname(cid, 'jpg'), lambda p: im.resize((256, 256), Image.LANCZOS).save(p, 'JPEG', quality=90), cid, base=icon_dir)
+        return cid
+    icon_cid = car_icon(parts[0], did(name, 'icon'))
     pw = 600 + 300 * len(order)
     preview.crop_to_content(preview.render(parts, pw, pw // 4, 62, -9, size * 1.15, 32, ctr)).save(os.path.join(root, 'preview.png'))
     preview.crop_to_content(preview.render(parts, pw, pw // 8, 90, 0, size * 1.1, 30, ctr)).save(os.path.join(root, 'preview_side.png'))
@@ -577,10 +660,19 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
              A.activity_location(ACTIVITY_BOARD, [(np.sign(x) * 1.3, 0.7, z) for x, y, z in doors]),
              A.ui_object(icon_cid, ui_group), A.effect_source(fx)]
     front_cid = did(name, 'front')
-    fp = A.train_front_prefab(name, mesh_cid, comps, car_cids, speed, reversed_end=True)
+    fp = A.train_front_prefab(name, mesh_cid, comps, carriages, speed, reversed_end=True, units=units)
     emit(os.path.join(name, fname(name, 'Prefab')), lambda p: A.write_prefab(p, fp), front_cid)
     emit(os.path.join(name, f'{fname(name, "Prefab")[:-7]}_en-US.loc'),
          lambda p: A.write_loc(p, {f'Assets.NAME[{name}]': title}), did(name, 'loc'))
+
+    # static props: one per car type, placeable like any prop (windows lit at night, lamps off)
+    for key, (pcid, ptitle) in prop_cids.items():
+        pstem = f'{name}_{"Cab" if key == front else "Mid" if key == "mid" else "Car" + chr(65 + car_keys.index(key))}Prop'
+        picon = car_icon(preview_parts[key][:4] + (base_img,), did(name, pstem, 'icon'))
+        sop = A.static_object_prefab(pstem, pcid, PROP_UI_GROUP, picon)
+        emit(os.path.join(name, fname(pstem, 'Prefab')), lambda p: A.write_prefab(p, sop), did(name, pstem, 'prop'))
+        emit(os.path.join(name, f'{fname(pstem, "Prefab")[:-7]}_en-US.loc'),
+             lambda p: A.write_loc(p, {f'Assets.NAME[{pstem}]': f'{ptitle} (static)'}), did(name, pstem, 'loc'))
 
     write_scripts(root, name, title, files, where='It runs on passenger train lines: the game picks it '
                   'at random when a line spawns a new train, or use a vehicle-selector mod to pick it.')
@@ -605,7 +697,8 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('crp'); ap.add_argument('--name', required=True); ap.add_argument('--title', required=True)
     ap.add_argument('--front', required=True, help='MESH:LOD entry indices of the lead car')
-    ap.add_argument('--car', action='append', default=[], help="MESH:LOD entry indices, in consist order, or 'mid'")
+    ap.add_argument('--car', action='append', default=[], help="MESH:LOD entry indices, in consist order, or 'mid'; append xMIN-MAX for a count range the game picks from (e.g. midx3-4)")
+    ap.add_argument('--units', default='1-1', help='MIN-MAX whole units the game may couple nose to tail (default 1-1)')
     ap.add_argument('--middle', help='MESH:LOD+MESH:LOD: cab car with its flat end at -Z, then one with it at +Z; '
                                      'their flat halves are joined into a cabless middle car usable as --car mid')
     ap.add_argument('--speed', type=int, default=200); ap.add_argument('--capacity', type=int, default=70)
@@ -614,6 +707,10 @@ if __name__ == '__main__':
     a = ap.parse_args()
     pair = lambda s: tuple(int(x) for x in s.split(':'))
     middle = tuple(pair(x) for x in a.middle.split('+')) if a.middle else None
-    root, z = build(a.crp, a.name, a.title, a.out, pair(a.front), [c if c == 'mid' else pair(c) for c in a.car],
-                    a.speed, a.capacity, a.ui_group, middle, a.calibrate)
+    def car_spec(text):
+        spec, _, rng = text.partition('x'); lo, _, hi = rng.partition('-') if rng else ('1', '', '1')
+        return (spec if spec == 'mid' else pair(spec), int(lo), int(hi or lo))
+    lo, _, hi = a.units.partition('-')
+    root, z = build(a.crp, a.name, a.title, a.out, pair(a.front), [car_spec(c) for c in a.car],
+                    a.speed, a.capacity, a.ui_group, middle, a.calibrate, (int(lo), int(hi or lo)))
     print('built', root); print('zip  ', z, os.path.getsize(z) // 1024, 'KB')
