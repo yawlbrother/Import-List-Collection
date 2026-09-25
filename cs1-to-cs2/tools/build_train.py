@@ -174,6 +174,23 @@ def uv_coverage(meshes, W, H):
             d.polygon([(u[a], v[a]), (u[b_], v[b_]), (u[c], v[c])], fill=255)
     return np.asarray(mask) > 0
 
+BAND_STRIP = dict(rows=(292, 328), y=(2.3, 2.7), cols=(570, 1380), shift=-26.5)   # see align_band_strip
+
+def align_band_strip(m, W=2048, H=1024):
+    """The CS1 middle cars map the panel strip between the window rows (y 2.34..2.66) to atlas rows
+    295..325, the cab car maps the same strip to rows 268..298; below it both map rows 298..330. On the
+    band that means the middle car shows the lower part twice and never the upper part. This gives
+    the middle car's upper strip the cab car's mapping (its own vertex copies, shifted 26.5 rows up)
+    so one band layout reads the same on every car."""
+    V = np.asarray(m['V'], np.float64); UV = np.asarray(m['UV'], np.float64); t3 = tri_array(m)
+    u = UV[:, 0] * (W - 1); v = (1 - UV[:, 1]) * (H - 1)
+    r0, r1 = BAND_STRIP['rows']; y0, y1 = BAND_STRIP['y']; c0, c1 = BAND_STRIP['cols']
+    tv, tu, ty, tx = v[t3], u[t3], V[t3][:, :, 1], V[t3][:, :, 0]
+    sel = ((tv.min(1) >= r0) & (tv.max(1) <= r1) & (ty.min(1) >= y0) & (ty.max(1) <= y1)
+           & (tu.min(1) >= c0) & (tu.max(1) <= c1) & (np.abs(tx).min(1) > 1.2))
+    idx = np.nonzero(sel)[0]
+    return relocate_triangles(m, idx, 0.0, -BAND_STRIP['shift'] / (H - 1)), len(idx)
+
 def door_leaf_triangles(m, doors):
     """Indices of the body triangles that are door leaves: on the side skin next to a CS1 door
     position, between DOOR_LEAF's bottom and top, facing sideways."""
@@ -621,6 +638,8 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
         if key in mesh_cache:
             return mesh_cache[key]
         m0 = apply_lamp_layout(meshes[''][key], key, layouts[''])
+        if brand:
+            m0, n_aligned = align_band_strip(m0, layouts['']['W'], layouts['']['H']); print(f'  {stem}: band strip triangles re-mapped: {n_aligned}')
         variants = {'_LOD2': meshes['_LOD2'][key], '_LOD1': simplify_mesh(m0), '': m0}
         train_lods, prop_lods = [], []
         doors_cid = None

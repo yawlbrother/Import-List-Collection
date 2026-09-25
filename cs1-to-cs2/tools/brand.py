@@ -58,10 +58,11 @@ def mark_okada(sz, col):
 
 MARKS = dict(helix=mark_helix, vanta=mark_vanta, nexus=mark_nexus, okada=mark_okada)
 BRANDS = {
-    'helix': dict(mark='helix', colour=(0, 225, 255), name='HELIX', sub='TRANSIT GROUP', code='HLX', unit='HX-3737', title='Helix Transit X40'),
-    'vanta': dict(mark='vanta', colour=(255, 186, 48), name='VANTA', sub='LINES', code='VNT', unit='V 3737', title='Vanta Lines X40'),
-    'nexus': dict(mark='nexus', colour=(255, 116, 0), name='NEXUS RAIL', sub='CITY TRANSIT AUTHORITY', code='NXR', unit='NX 3737', title='Nexus Rail X40'),
-    'okada': dict(mark='okada', colour=(222, 28, 60), name='OKADA-VANCE', sub='MOBILITY DIVISION', code='OV', unit='OV-3737', title='Okada-Vance X40'),
+    # name/sub: the wordmark block left of the mark; right/right_sub: the block right of it
+    'helix': dict(mark='helix', colour=(0, 225, 255), name='HELIX', sub='TRANSIT GROUP', right='HX-3737', right_sub='MOVING THE CITY', code='HLX', unit='HX-3737', title='Helix Transit X40'),
+    'vanta': dict(mark='vanta', colour=(255, 186, 48), name='VANTA', sub='LINES', right='V 3737', right_sub='FIRST CLASS ONLY', code='VNT', unit='V 3737', title='Vanta Lines X40'),
+    'nexus': dict(mark='nexus', colour=(255, 116, 0), name='NEXUS RAIL', sub='CITY TRANSIT AUTHORITY', right='NX 3737', right_sub='PUBLIC SERVICE', code='NXR', unit='NX 3737', title='Nexus Rail X40'),
+    'okada': dict(mark='okada', colour=(222, 28, 60), name='OKADA-VANCE', sub='MOBILITY DIVISION', right='OV-3737', right_sub='SINCE 2041', code='OV', unit='OV-3737', title='Okada-Vance X40'),
 }
 
 def text_img(txt, kind, size, fill, tracking=0):
@@ -110,9 +111,9 @@ def apply(slots, lay, brand, glow_index=1):
     clear('band', 'band')
     if s >= 0.5:
         put(mark(int(60 * s), col), 975, 289, glow=True)
-        name = text_img(brand['name'], 'bold', 30 * s, white, tracking=5 * s); sub = text_img(brand['sub'], 'regular', 10 * s, col, tracking=3 * s)
-        for cx in (740, 1210):
-            put(name, cx, 281, glow=True); put(sub, cx, 307)
+        for cx, big, small in ((740, brand['name'], brand['sub']), (1210, brand['right'], brand['right_sub'])):
+            put(text_img(big, 'bold', 30 * s, white, tracking=5 * s), cx, 281, glow=True)
+            put(text_img(small, 'regular', 10 * s, col, tracking=3 * s), cx, 307)
         for key, cx in (('door_a', 413), ('door_b', 1548)):
             clear(key, 'door'); put(mark(int(32 * s), col), cx, 402, glow=True)
         clear('nose', 'nose'); put(mark(int(46 * s), col).rotate(-18, resample=Image.BICUBIC, expand=True), 1967, 719)
