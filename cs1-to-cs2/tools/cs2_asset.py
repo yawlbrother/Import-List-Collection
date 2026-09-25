@@ -13,7 +13,7 @@ Formats (all verified against assets made by the game's own importer):
             object gets "$type" written "N|Full.Type, Assembly" on first use and N afterwards
             (a second counter). Asset references are bare tokens: $fstrref:"CID:<cid>".
 """
-import hashlib, json, os, secrets, struct
+import json, os, secrets, struct
 
 def new_id():
     return secrets.token_hex(16)
@@ -39,13 +39,21 @@ VT_TILE = 512   # the game streams textures in 512 px tiles; a stack smaller tha
 
 def write_surface(path, textures, template=1, keywords=('_TANGENTSPACE_OCTO',), vt=None):
     """textures: list of (slot name, texture cid) e.g. ('_BaseColorMap', 'ab12...').
-    vt: (width, height) of the textures, or None. With it the surface carries the two virtual-texture
-    stacks every Colossal surface has (KISS, vanilla props): stack 1 = BaseColor, Normal, MaskMap,
-    ControlMask; stack 2 = Emissive; 8 slots of 16 bytes each, unused slots zero, then a 16-byte id.
-    Without the block the game streams the base colour, normal, mask and emissive maps fine but the
-    control mask never reaches the normal render path, so colour masks only show while highlighted.
-    Textures smaller than VT_TILE on either side cannot go through streaming ("All sizes need to be
-    bigger than the tileSize!" at start-up), so such a surface is written without the block."""
+    vt: (width, height) or None. None (the default, and the only layout known to render) writes a plain
+    surface: the game binds every listed .Texture straight to the material (ManagedBatchSystem.CreateMaterial
+    sets each one that is not "handled by virtual texturing").
+    With a size the surface gets the virtual-texture block the game's own asset importer writes
+    (AssetImportPipeline.ProcessSurfacesForVT): two stacks (1 = BaseColor, Normal, MaskMap, ControlMask;
+    2 = Emissive), each u32 width, u32 height and eight 16-byte ids: slots 0-3 the source textures, slots
+    4-7 the pre-baked StreamingData~/VT/*.VTTexture tiles for the same maps; after the stacks a nullable
+    reference (ff + 16 bytes, or 00) to the surface's *.VTSurface page table. Textures in a stack are then
+    streamed from those files instead of being bound, so a surface written with the block but without the
+    baked tiles renders nothing (SJX40 v21: visible only at the LOD2 distance, whose surfaces were plain).
+    This tool cannot bake the tiles, so the block is experimental: it is written with the source ids only
+    and no VTSurface reference, like the vanilla bin prop. A stack smaller than VT_TILE on either side
+    aborts the game at start-up ("All sizes need to be bigger than the tileSize!"), so such a surface is
+    always written plain. Hash128 ids are stored with the nibbles of each byte swapped relative to the
+    .cid text (cid_bytes does that)."""
     if vt and min(vt) < VT_TILE:
         vt = None
     by_slot = dict(textures)
@@ -56,7 +64,7 @@ def write_surface(path, textures, template=1, keywords=('_TANGENTSPACE_OCTO',), 
             b += struct.pack('<II', w, h)
             for k in range(8):
                 b += cid_bytes(by_slot[stack[k]]) if k < len(stack) and stack[k] in by_slot else b'\x00' * 16
-        b += b'\xff' + hashlib.md5(('vt/' + os.path.basename(path)).encode()).digest()   # ff = reference tag
+        b += b'\x00'                                                      # no VTSurface page table
     else:
         b += b'\x00'
     b += b'\xff\x00\x00\x00\x00' * 4 + b'\xff'                              # four empty property lists

@@ -617,7 +617,7 @@ def splice_middle(b, E, minus, plus):
     return mesh, lod, tyres, doors
 
 # ---------------------------------------------------------------- build
-def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=None, calibrate=False, units=(1, 1), door_canary=False, brand=None):
+def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=None, calibrate=False, units=(1, 1), door_canary=False, brand=None, vt=False):
     """cars: list of (car key, min count, max count) in consist order; units: (min, max) whole units the game may couple."""
     b, hdr, E = C.parse(crp)
     mats = cs1_materials(b, E)
@@ -663,7 +663,7 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
         print(f'lights{level or "_LOD0"}: windows {int(lay["regions"]["windows"].sum())} px, cab {int(lay["regions"]["cab"].sum())} px, lamp lens {lay["box"]}, '
               f'red at texel rows {"top" if lay["red_top"] else "bottom" if lay["red_top"] is False else "n/a"}, '
               f'roof-lamp copy at {lay["copy"]}, door lamp patch at {lay["door_patch"]}, roof-lamp triangles ' + str({str(k)[:8]: len(v) for k, v in lay['upper'].items()}))
-        vt_size[level] = slots['BaseColor'][0].size
+        vt_size[level] = slots['BaseColor'][0].size if vt else None   # see write_surface: needs streaming data we cannot make
         for slot, (im, srgb) in slots.items():
             cid = did(name, level, slot)
             emit(fname(f'{name}{level}_{slot}', 'Texture'),
@@ -845,6 +845,8 @@ if __name__ == '__main__':
     ap.add_argument('--calibrate', action='store_true', help='carriage types A/B/C get 0.4/0.2/0.1 of the interior light intensity')
     ap.add_argument('--door-canary', action='store_true', help='left door lamps always on (diagnostic)')
     ap.add_argument('--brand', choices=sorted(B.BRANDS), help='paint this operator identity over the SJ branding (mark and wordmark glow at night)')
+    ap.add_argument('--vt', action='store_true', help='write the virtual-texture stack block into the surfaces (experimental: the game then expects '
+                    'pre-baked StreamingData~ tiles this tool does not produce, and the near LODs render nothing)')
     a = ap.parse_args()
     pair = lambda s: tuple(int(x) for x in s.split(':'))
     middle = tuple(pair(x) for x in a.middle.split('+')) if a.middle else None
@@ -853,5 +855,5 @@ if __name__ == '__main__':
         return (spec if spec == 'mid' else pair(spec), int(lo), int(hi or lo))
     lo, _, hi = a.units.partition('-')
     root, z = build(a.crp, a.name, a.title, a.out, pair(a.front), [car_spec(c) for c in a.car],
-                    a.speed, a.capacity, a.ui_group, middle, a.calibrate, (int(lo), int(hi or lo)), a.door_canary, a.brand)
+                    a.speed, a.capacity, a.ui_group, middle, a.calibrate, (int(lo), int(hi or lo)), a.door_canary, a.brand, a.vt)
     print('built', root); print('zip  ', z, os.path.getsize(z) // 1024, 'KB')
