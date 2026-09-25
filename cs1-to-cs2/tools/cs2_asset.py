@@ -272,6 +272,27 @@ def train_front_prefab(name, mesh_cid, components, carriages, speed=200, reverse
 
 COLOR = 'UnityEngine.Color, UnityEngine.CoreModule'
 
+def int3(x, y, z):
+    return Obj('Unity.Mathematics.int3, Unity.Mathematics', dict(x=int(x), y=int(y), z=int(z)), ref=False)
+
+def color_properties(colors, external=(True, False, False), source=1):
+    """One colour variation for a render prefab: `colors` are the three channel colours (RGBA 0..1)
+    multiplied into the texels the ControlMask marks (R = channel 0, G = 1, B = 2). A channel with
+    external=True is overwritten from the colour source instead: source 1 (Parent) is the vehicle's
+    transport line (or a building's brand), 0 is Brand. Variation ranges are 0: no hue jitter."""
+    L = 'System.Collections.Generic.List`1[[Game.Prefabs.ColorProperties+{0}, Game]], mscorlib'
+    bind = Arr(L.format('ColorChannelBinding'), [
+        Obj('Game.Prefabs.ColorProperties+ColorChannelBinding, Game', dict(m_ChannelId=k, m_CanBeModifiedByExternal=bool(e)))
+        for k, e in enumerate(external)])
+    sets = Arr(L.format('VariationSet'), [
+        Obj('Game.Prefabs.ColorProperties+VariationSet, Game', dict(
+            m_Colors=Arr('UnityEngine.Color[], UnityEngine.CoreModule', [Bare(COLOR, list(c)) for c in colors]),
+            m_VariationGroup=''))])
+    return Obj('Game.Prefabs.ColorProperties, Game', dict(
+        name='ColorProperties', active=True, m_ColorVariations=sets, m_ChannelsBinding=bind,
+        m_VariationGroups=Arr(L.format('VariationGroup'), []), m_VariationRanges=int3(0, 0, 0),
+        m_AlphaRanges=int3(0, 0, 0), m_ExternalColorSource=int(source)))
+
 def emissive_properties(multi):
     """multi: list of (purpose, color, colorOff, intensity, luminance, layerId)."""
     items = [Obj('Game.Prefabs.EmissiveProperties+MultiLightMapping, Game', dict(

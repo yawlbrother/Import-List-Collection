@@ -77,6 +77,13 @@ DOOR_LAMP = (0.16, 0.08, 3.02)       # door indicator lamp: width (along the car
 LOD1_RATIO = 0.4                     # LOD1 keeps this share of LOD0's triangles (KISS: 44 %)
 PATCH = 12                           # atlas texels reserved for the door lamp patch
 
+# Line colour: the door leaves take the transport line's colour. ControlMask R marks the texels
+# (colour set channel 0), the shader multiplies the base colour by the channel colour, so those
+# texels are lightened first (a black door times any colour is black); the variation's own channel
+# colour is a dark grey that restores the livery look when the car is not on a line (props, depot).
+DOOR_LEAF = (0.72, 0.45, 2.35)       # half width along the car, bottom and top of a door leaf (m)
+LINE_BASE = (0.35, 160)              # base colour under the mask: base * 0.35 + 160
+LINE_DEFAULT = (0.19, 0.19, 0.21, 1) # channel 0 colour off-line: about the livery's dark grey again
 RED_FRACTION = 0.4       # bottom part of a combined head/tail lamp lens that glows red
 UPPER_LAMP_GAP = 0.8     # lamps this much above the lowest lamp are roof lamps: white only
 
@@ -165,6 +172,45 @@ def uv_coverage(meshes, W, H):
         for a, b_, c in tri_array(m):
             d.polygon([(u[a], v[a]), (u[b_], v[b_]), (u[c], v[c])], fill=255)
     return np.asarray(mask) > 0
+
+def door_leaf_triangles(m, doors):
+    """Indices of the body triangles that are door leaves: on the side skin next to a CS1 door
+    position, between DOOR_LEAF's bottom and top, facing sideways."""
+    V = np.asarray(m['V'], np.float64); N = np.asarray(m['N'], np.float64); t3 = tri_array(m)
+    if not len(doors) or not len(t3):
+        return np.zeros(0, np.int64)
+    hw, y0, y1 = DOOR_LEAF; c = V[t3].mean(1); n = N[t3].mean(1)
+    side = (np.abs(n[:, 0]) > 0.6) & (c[:, 1] > y0) & (c[:, 1] < y1)
+    near = np.zeros(len(t3), bool)
+    for x, _, z in doors:
+        skin = np.abs(V[(np.abs(V[:, 2] - z) < hw) & (V[:, 1] > y0) & (V[:, 1] < y1), 0])
+        bx = float(skin.max()) if len(skin) else abs(x)
+        near |= (np.abs(c[:, 2] - z) < hw) & (np.sign(c[:, 0]) == np.sign(x)) & (np.abs(c[:, 0]) > bx - 0.15)
+    return np.nonzero(side & near)[0]
+
+def uv_mask(m, tri_idx, W, H):
+    """Texels covered by the given triangles of mesh `m` (bool H x W)."""
+    from PIL import ImageDraw
+    mask = Image.new('L', (W, H), 0); d = ImageDraw.Draw(mask); u, v = uv_pixels(m, W, H)
+    for a, b_, c in tri_array(m)[tri_idx]:
+        d.polygon([(u[a], v[a]), (u[b_], v[b_]), (u[c], v[c])], fill=255)
+    return np.asarray(mask) > 0
+
+def paint_line_mask(slots, meshes, doors_by_key, lay):
+    """Marks the door leaves of every mesh on this atlas in ControlMask R and lightens their base
+    colour; lit texels (door windows) stay as they are. Returns the mask and the triangle counts."""
+    W, H = lay['W'], lay['H']; mask = np.zeros((H, W), bool); counts = {}
+    for key, m in meshes.items():
+        tri = door_leaf_triangles(m, doors_by_key.get(key, ())); counts[str(key)[:8]] = len(tri)
+        mask |= uv_mask(m, tri, W, H)
+    mask &= lay['index_map'] == 0
+    if mask.any():
+        cm = np.array(slots['ControlMask'][0]); cm[mask, 0] = 255; slots['ControlMask'][0].paste(Image.fromarray(cm))
+        bc = np.array(slots['BaseColor'][0]).astype(np.float32)
+        bc[mask, :3] = bc[mask, :3] * LINE_BASE[0] + LINE_BASE[1]
+        slots['BaseColor'][0].paste(Image.fromarray(np.clip(bc, 0, 255).astype(np.uint8)))
+    lay['line_mask'] = mask
+    return mask, counts
 
 def find_free_rect(cov, w, h, margin=8):
     """Top-left (x, y), 4-aligned, of a w x h texel rectangle no triangle maps to, with `margin` free around it."""
@@ -541,6 +587,7 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
         else:
             meshes[''][key], meshes['_LOD2'][key] = C.read_mesh(b, E[key[0]]), C.read_mesh(b, E[key[1]])
 
+    doors_by_key = {k: (synthetic[k][3] if k in synthetic else vehicle_data(b, E, k[0])[0]) for k in keys}
     tex_cids = {}; layouts = {}
     for level, mi in (('', front[0]), ('_LOD2', front[1])):
         tex_cids[level] = []
@@ -549,6 +596,8 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
         lay = layouts[level] = lamp_layout(aci, meshes[level], front, relocate=(level == ''))
         copy_lamp_texels(slots, lay)
         slots['Emissive'] = (paint_emissive(lay), True)
+        line_mask, line_tris = paint_line_mask(slots, meshes[level], doors_by_key, lay)
+        print(f'line colour{level or "_LOD0"}: door leaf triangles {line_tris}, {int(line_mask.sum())} texels masked')
         print(f'lights{level or "_LOD0"}: windows {int(lay["regions"]["windows"].sum())} px, cab {int(lay["regions"]["cab"].sum())} px, lamp lens {lay["box"]}, '
               f'red at texel rows {"top" if lay["red_top"] else "bottom" if lay["red_top"] is False else "n/a"}, '
               f'roof-lamp copy at {lay["copy"]}, door lamp patch at {lay["door_patch"]}, roof-lamp triangles ' + str({str(k)[:8]: len(v) for k, v in lay['upper'].items()}))
@@ -593,6 +642,8 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
             emit(fname(s, 'Surface'), lambda p: A.write_surface(p, tex_cids[level], keywords=SURFACE_KEYWORDS), surf_cid)
             prop_geo = geo_cid = did(name, s, 'geometry')
             train_comps = [A.emissive_properties(light_table(scale))]
+            line = [A.color_properties([LINE_DEFAULT, WHITE, WHITE])] if level == '' else []
+            train_comps += line
             if level == '':
                 # the prop gets the same mesh without bone indices (a static object has no skeleton)
                 prop_geo = did(name, s, 'geometry-prop'); emit(fname(s + '_Prop', 'Geometry'), lambda p: G.write(p, tris, attrs), prop_geo)
@@ -603,7 +654,7 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
                 preview_parts[key] = (V, np.asarray(m['N']), np.asarray(m['UV']), tris.reshape(-1, 3), bones)
             emit(fname(s, 'Geometry'), lambda p: G.write(p, tris, attrs), geo_cid)
             for kind, geo, comps, lods in (('', geo_cid, train_comps, train_lods),
-                                           ('_Prop', prop_geo, [A.emissive_properties(light_table(prop=True))], prop_lods)):
+                                           ('_Prop', prop_geo, [A.emissive_properties(light_table(prop=True))] + line, prop_lods)):
                 rp_cid = did(name, s + kind, 'renderprefab')
                 rp = A.render_prefab(f'{s}{kind} Mesh', geo, [surf_cid], lo, hi, area, len(tris), n,
                                      lod_cids=list(reversed(lods)) if level == '' else [], components=comps)
@@ -664,6 +715,11 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
     pw = 600 + 300 * len(order)
     preview.crop_to_content(preview.render(parts, pw, pw // 4, 62, -9, size * 1.15, 32, ctr)).save(os.path.join(root, 'preview.png'))
     preview.crop_to_content(preview.render(parts, pw, pw // 8, 90, 0, size * 1.1, 30, ctr)).save(os.path.join(root, 'preview_side.png'))
+    lm = layouts['']['line_mask']
+    if lm.any():   # the door leaves in a sample line colour, as the game will multiply them
+        tinted = np.asarray(base_img.convert('RGB')).astype(np.float32); tinted[lm] *= np.array([0.1, 0.45, 0.9])
+        tinted_img = Image.fromarray(tinted.astype(np.uint8)); lparts = [(Vp, Np, UVp, Tp, tinted_img) for Vp, Np, UVp, Tp, _ in parts]
+        preview.crop_to_content(preview.render(lparts, pw, pw // 8, 90, 0, size * 1.1, 30, ctr)).save(os.path.join(root, 'preview_line.png'))
     bone_img = bone_preview(preview_parts[front]); bone_img.save(os.path.join(root, 'bones.png'))
     # night previews: base colour dimmed, lit texels in their light colour
     e = np.asarray(emissive_img); night = (np.asarray(base_img.convert('RGB')).astype(np.float32) * 0.22)
@@ -718,7 +774,8 @@ if __name__ == '__main__':
     ap.add_argument('--units', default='1-1', help='MIN-MAX whole units the game may couple nose to tail (default 1-1)')
     ap.add_argument('--middle', help='MESH:LOD+MESH:LOD: cab car with its flat end at -Z, then one with it at +Z; '
                                      'their flat halves are joined into a cabless middle car usable as --car mid')
-    ap.add_argument('--speed', type=int, default=200); ap.add_argument('--capacity', type=int, default=70)
+    ap.add_argument('--speed', type=int, default=200)
+    ap.add_argument('--capacity', type=int, default=95, help='passengers per car (X40: about 95, a 3-car set seats 285)')
     ap.add_argument('--out', default='dist'); ap.add_argument('--ui-group', default=None)
     ap.add_argument('--calibrate', action='store_true', help='carriage types A/B/C get 0.4/0.2/0.1 of the interior light intensity')
     ap.add_argument('--door-canary', action='store_true', help='left door lamps always on (diagnostic)')
