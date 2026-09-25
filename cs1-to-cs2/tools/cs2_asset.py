@@ -238,10 +238,12 @@ def effect_source(effects):
         m_Effects=Arr('System.Collections.Generic.List`1[[Game.Prefabs.EffectSource+EffectSettings, Game]], mscorlib', items),
         m_AnimationCurves=Arr('System.Collections.Generic.List`1[[Game.Prefabs.EffectSource+AnimationProperties, Game]], mscorlib', [])))
 
-def _mesh_list(mesh_cid):
+def _mesh_list(mesh_cids):
+    """One ObjectMeshInfo per render prefab cid (a str or a list): sub-meshes of one object."""
+    cids = [mesh_cids] if isinstance(mesh_cids, str) else list(mesh_cids)
     return Arr('Game.Prefabs.ObjectMeshInfo[], Game', [
-        Obj('Game.Prefabs.ObjectMeshInfo, Game', dict(m_Mesh=Ref('CID:' + mesh_cid), m_Position=float3(0, 0, 0),
-                                                       m_Rotation=quat_identity(), m_RequireState=0))])
+        Obj('Game.Prefabs.ObjectMeshInfo, Game', dict(m_Mesh=Ref('CID:' + c), m_Position=float3(0, 0, 0),
+                                                       m_Rotation=quat_identity(), m_RequireState=0)) for c in cids])
 
 TRAIN_DEFAULTS = dict(m_Circular=False, m_TrackType=1, m_EnergyType=2, m_MaxSpeed=200, m_Acceleration=5,
                       m_Braking=10)
