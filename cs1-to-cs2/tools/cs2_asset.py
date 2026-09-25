@@ -275,11 +275,13 @@ COLOR = 'UnityEngine.Color, UnityEngine.CoreModule'
 def int3(x, y, z):
     return Obj('Unity.Mathematics.int3, Unity.Mathematics', dict(x=int(x), y=int(y), z=int(z)), ref=False)
 
-def color_properties(colors, external=(True, False, False), source=1):
+def color_properties(colors, external=(True, False, False), source=0):
     """One colour variation for a render prefab: `colors` are the three channel colours (RGBA 0..1)
     multiplied into the texels the ControlMask marks (R = channel 0, G = 1, B = 2). A channel with
-    external=True is overwritten from the colour source instead: source 1 (Parent) is the vehicle's
-    transport line (or a building's brand), 0 is Brand. Variation ranges are 0: no hue jitter."""
+    external=True is overwritten from the colour source instead. Game.Rendering.ColorSourceType:
+    0 Brand = the entity's brand, else its CurrentRoute's colour (a transport vehicle's line colour),
+    else the default brand; 1 Parent = a copy of the owner's mesh colours (a building's sub-objects; for
+    a vehicle that is its depot, so never use it for line colour). Variation ranges are 0: no jitter."""
     L = 'System.Collections.Generic.List`1[[Game.Prefabs.ColorProperties+{0}, Game]], mscorlib'
     bind = Arr(L.format('ColorChannelBinding'), [
         Obj('Game.Prefabs.ColorProperties+ColorChannelBinding, Game', dict(m_ChannelId=k, m_CanBeModifiedByExternal=bool(e)))

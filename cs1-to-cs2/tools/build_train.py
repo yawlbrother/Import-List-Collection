@@ -83,6 +83,12 @@ PATCH = 12                           # atlas texels reserved for the door lamp p
 # texels are lightened first (a black door times any colour is black); the variation's own channel
 # colour is a dark grey that restores the livery look when the car is not on a line (props, depot).
 DOOR_LEAF = (0.72, 0.45, 2.35)       # half width along the car, bottom and top of a door leaf (m)
+# More line-coloured elements: a pinstripe along the lower body, painted by world height (every
+# side-facing triangle is clipped to the slab and the piece rasterised in UV space, so it runs the
+# whole car whatever the atlas layout) and, with a brand band, a short rule under each text block
+# (atlas rectangles x0, y0, x1, y1 on the 2048 x 1024 layout).
+LINE_STRIPE_Y = (0.62, 0.70)
+LINE_BAND_RULES = [(604, 316, 932, 319), (1018, 316, 1346, 319)]
 LINE_BASE = (0.35, 160)              # base colour under the mask: base * 0.35 + 160
 LINE_DEFAULT = (0.19, 0.19, 0.21, 1) # channel 0 colour off-line: about the livery's dark grey again
 RED_FRACTION = 0.4       # bottom part of a combined head/tail lamp lens that glows red
@@ -214,13 +220,49 @@ def uv_mask(m, tri_idx, W, H):
         d.polygon([(u[a], v[a]), (u[b_], v[b_]), (u[c], v[c])], fill=255)
     return np.asarray(mask) > 0
 
-def paint_line_mask(slots, meshes, doors_by_key, lay):
+def slab_mask(m, y0, y1, W, H):
+    """Texels of the side skin between heights y0 and y1: each side-facing triangle is clipped to the
+    slab (Sutherland-Hodgman on y, UVs interpolated) and the clipped polygon filled in UV space."""
+    from PIL import ImageDraw
+    V = np.asarray(m['V'], np.float64); N = np.asarray(m['N'], np.float64); t3 = tri_array(m)
+    u, v = uv_pixels(m, W, H); mask = Image.new('L', (W, H), 0); d = ImageDraw.Draw(mask)
+    side = (np.abs(N[t3].mean(1)[:, 0]) > 0.6) & (np.abs(V[t3][:, :, 0]).min(1) > 1.2)
+    ys = V[t3][:, :, 1]
+    for i in np.nonzero(side & (ys.min(1) < y1) & (ys.max(1) > y0))[0]:
+        poly = [(V[k, 1], u[k], v[k]) for k in t3[i]]
+        for lo, sign in ((y0, 1.0), (y1, -1.0)):          # keep y >= y0, then y <= y1
+            out = []
+            for a, b in zip(poly, poly[1:] + poly[:1]):
+                ia, ib = sign * (a[0] - lo) >= 0, sign * (b[0] - lo) >= 0
+                if ia:
+                    out.append(a)
+                if ia != ib:
+                    t = (lo - a[0]) / (b[0] - a[0]); out.append((lo, a[1] + t * (b[1] - a[1]), a[2] + t * (b[2] - a[2])))
+            poly = out
+        if len(poly) >= 3:
+            d.polygon([(p[1], p[2]) for p in poly], fill=255)
+    return np.asarray(mask) > 0
+
+def paint_line_mask(slots, meshes, doors_by_key, lay, band_rules=False):
     """Marks the door leaves of every mesh on this atlas in ControlMask R and lightens their base
-    colour; lit texels (door windows) stay as they are. Returns the mask and the triangle counts."""
+    colour, plus the LINE_STRIPES pinstripe and (band_rules) the LINE_BAND_RULES; lit texels (door
+    windows, brand glow) stay as they are. Returns the mask and the triangle counts."""
     W, H = lay['W'], lay['H']; mask = np.zeros((H, W), bool); counts = {}
     for key, m in meshes.items():
         tri = door_leaf_triangles(m, doors_by_key.get(key, ())); counts[str(key)[:8]] = len(tri)
         mask |= uv_mask(m, tri, W, H)
+    sc = W / 2048.0
+    if sc >= 0.5:
+        stripe = np.zeros((H, W), bool); shared = np.zeros((H, W), bool)
+        for m in meshes.values():
+            stripe |= slab_mask(m, *LINE_STRIPE_Y, W, H)
+            V = np.asarray(m['V'], np.float64); N = np.asarray(m['N'], np.float64); t3 = tri_array(m)
+            other = np.nonzero((np.abs(N[t3].mean(1)[:, 0]) <= 0.6) | (np.abs(V[t3][:, :, 0]).min(1) <= 1.2))[0]
+            shared |= uv_mask(m, other, W, H)      # texels the roof, ends and underframe also sample
+        mask |= stripe & ~shared
+    for x0, y0, x1, y1 in (LINE_BAND_RULES if band_rules else []):
+        if (y1 - y0) * sc >= 2:
+            mask[int(y0 * sc):int(y1 * sc), int(x0 * sc):int(x1 * sc)] = True
     mask &= lay['index_map'] == 0
     if mask.any():
         cm = np.array(slots['ControlMask'][0]); cm[mask, 0] = 255; slots['ControlMask'][0].paste(Image.fromarray(cm))
@@ -616,7 +658,7 @@ def build(crp, name, title, out, front, cars, speed, capacity, ui_group, middle=
         slots['Emissive'] = (paint_emissive(lay), True)
         if brand:   # operator identity over the SJ crests, before the line mask so its lit texels stay unmasked
             B.apply(slots, lay, B.BRANDS[brand])
-        line_mask, line_tris = paint_line_mask(slots, meshes[level], doors_by_key, lay)
+        line_mask, line_tris = paint_line_mask(slots, meshes[level], doors_by_key, lay, band_rules=bool(brand))
         print(f'line colour{level or "_LOD0"}: door leaf triangles {line_tris}, {int(line_mask.sum())} texels masked')
         print(f'lights{level or "_LOD0"}: windows {int(lay["regions"]["windows"].sum())} px, cab {int(lay["regions"]["cab"].sum())} px, lamp lens {lay["box"]}, '
               f'red at texel rows {"top" if lay["red_top"] else "bottom" if lay["red_top"] is False else "n/a"}, '
